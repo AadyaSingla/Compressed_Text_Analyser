@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block content %}
+  <h2>Run a BPE experiment</h2>
+  <form action="{{ url_for('run') }}" method="post" enctype="multipart/form-data">
+    <label for="text">Paste text</label>
+    <textarea id="text" name="text" placeholder="Paste any text to analyse…"></textarea>
+
+    <div class="row">
+      <div>
+        <label for="file">…or upload a file</label>
+        <input type="file" id="file" name="file">
+      </div>
+      <div>
+        <label for="sample">…or pick a sample</label>
+        <select id="sample" name="sample">
+          <option value="">(none)</option>
+          {% for s in samples %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
+        </select>
+      </div>
+    </div>
+
+    <div class="row">
+      <div>
+        <label for="k_max">k — number of BPE merges</label>
+        <input type="number" id="k_max" name="k_max" value="200" min="0" max="2000">
+      </div>
+      <div>
+        <label for="k_step">Sweep step <span class="muted">(0 = single run at k)</span></label>
+        <input type="number" id="k_step" name="k_step" value="25" min="0" max="2000">
+      </div>
+    </div>
+    <p class="muted">With a step, the analyser runs k = 0, step, 2·step, … up to k, so the
+      results page can plot compression ratio and vocabulary size against k.
+      Repeated (input, k) pairs reuse the stored row — no duplicates.</p>
+    <button type="submit">Run analysis</button>
+  </form>
+
+  <h2>Stored inputs</h2>
+  {% if inputs %}
+  <table>
+    <tr><th>Label</th><th class="num">Chars</th><th class="num">Runs</th>
+        <th class="num">Max k</th><th>Last run (UTC)</th><th></th></tr>
+    {% for i in inputs %}
+    <tr>
+      <td><a href="{{ url_for('results', ihash=i['input_hash']) }}">{{ i['label'] }}</a></td>
+      <td class="num">{{ i['original_chars'] }}</td>
+      <td class="num">{{ i['runs'] }}</td>
+      <td class="num">{{ i['max_k'] }}</td>
+      <td>{{ i['last_run'] }}</td>
+      <td>
+        <form action="{{ url_for('delete', ihash=i['input_hash']) }}" method="post"
+              onsubmit="return confirm('Delete all runs for this input?');">
+          <button class="danger" type="submit">Delete</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+    <p class="muted">No experiments yet — run one above.</p>
+  {% endif %}
+{% endblock %}

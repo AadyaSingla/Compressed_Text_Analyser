@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}{{ label }} · Compressed Text Analyser{% endblock %}
+{% block content %}
+  <h2>Results — {{ label }}</h2>
+  <div class="actions">
+    <a class="btn" href="{{ url_for('report', ihash=ihash) }}">Download results (PNG)</a>
+  </div>
+  <img class="plot" src="{{ url_for('plot', ihash=ihash) }}" alt="Compression ratio and vocabulary size vs k">
+
+  <table>
+    <tr>
+      <th class="num">k</th><th class="num">Merges applied</th><th class="num">Chars</th>
+      <th class="num">Tokens</th><th class="num">Vocab</th>
+      <th class="num">Ratio</th><th>Longest token</th>
+    </tr>
+    {% for r in rows %}
+    <tr>
+      <td class="num">{{ r['k'] }}</td>
+      <td class="num">{{ r['merges_applied'] }}</td>
+      <td class="num">{{ r['original_chars'] }}</td>
+      <td class="num">{{ r['token_count'] }}</td>
+      <td class="num">{{ r['vocab_size'] }}</td>
+      <td class="num">{{ '%.3f' % r['compression_ratio'] }}</td>
+      <td><code>{{ r['longest_token'] }}</code></td>
+    </tr>
+    {% endfor %}
+  </table>
+
+  <h2>Input preview</h2>
+  <pre class="preview">{{ preview }}{% if rows[0]['original_chars'] > 400 %}…{% endif %}</pre>
+{% endblock %}
