@@ -64,7 +64,7 @@ def analyse(text, k):
         "original_chars": original_len,
         "token_count": token_count,
         "vocab_size": vocab_size,
-        "compression_ratio": token_count / original_len if original_len else 0.0,
+        "utility": original_len - token_count,
         "longest_token": max((t for t in set(tokens)), key=len, default=""),
         "merges": merges,
     }

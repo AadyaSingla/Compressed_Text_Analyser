@@ -118,13 +118,13 @@ def results(ihash):
 
 def _draw_plots(ax1, ax2, rows):
     ks = [r["k"] for r in rows]
-    ratios = [r["compression_ratio"] for r in rows]
+    utilities = [r["utility"] for r in rows]
     vocab = [r["vocab_size"] for r in rows]
 
-    ax1.plot(ks, ratios, marker="o", color="#4058B0")
+    ax1.plot(ks, utilities, marker="o", color="#4058B0")
     ax1.set_xlabel("k (BPE merges)")
-    ax1.set_ylabel("Compression ratio (tokens / chars)")
-    ax1.set_title("Compression ratio vs k")
+    ax1.set_ylabel("Compression utility (|s| - |s_k|), characters saved")
+    ax1.set_title("Compression utility vs k")
     ax1.grid(True, alpha=0.3)
 
     ax2.plot(ks, vocab, marker="o", color="#B05840")
@@ -176,7 +176,7 @@ def report(ihash):
 
     ax = fig.add_subplot(gs[1, :])
     ax.axis("off")
-    columns = ["k", "Merges applied", "Chars", "Tokens", "Vocab", "Ratio",
+    columns = ["k", "Merges applied", "Chars", "Tokens", "Vocab", "Utility",
                "Longest token"]
     def _clip(token):
         token = token.replace("\n", "\\n")
@@ -184,7 +184,7 @@ def report(ihash):
 
     cells = [
         [r["k"], r["merges_applied"], r["original_chars"], r["token_count"],
-         r["vocab_size"], f"{r['compression_ratio']:.3f}",
+         r["vocab_size"], str(r["utility"]),
          _clip(r["longest_token"])]
         for r in rows
     ]
@@ -211,7 +211,7 @@ def download_csv(ihash):
         abort(404)
 
     columns = ["label", "k", "merges_applied", "original_chars", "token_count",
-               "vocab_size", "compression_ratio", "longest_token", "created_at"]
+               "vocab_size", "utility", "longest_token", "created_at"]
     out = io.StringIO()
     writer = csv.writer(out)
     writer.writerow(columns)

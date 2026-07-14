@@ -7,6 +7,26 @@ project evolves.)
 
 ---
 
+## 2026-07-14 — Compression ratio replaced by compression utility
+
+- **The headline metric is now compression utility** `U(s,k) = |s| − |s_k|` —
+  the absolute number of characters saved after k BPE merges (Kozma &
+  Voderholzer's definition of compression utility, applied to BPE's own greedy
+  merge sequence). It replaces `compression_ratio` everywhere: `bpe.analyse()`
+  returns it under the `"utility"` key, the DB column is `utility INTEGER`
+  (it's always a non-negative whole number of characters, never a ratio), and
+  the plot, report PNG, CSV export, and results table all show it. The k = 0
+  baseline is now utility = 0 (was ratio 1.0), and the curve *rises* with k.
+- **Existing `experiments.db` migrated in place, no re-runs needed**: utility
+  is exactly derivable from stored columns as `original_chars − token_count`,
+  so the table was rebuilt under the new schema with utility recomputed for
+  all rows (ids and timestamps preserved). Old `compression_ratio` values were
+  dropped. A DB created before this change will not work with the new code
+  without this migration — `save_experiment` inserts a `utility` column that
+  the old table lacks (`CREATE TABLE IF NOT EXISTS` won't alter an existing
+  table), so any un-migrated copy must be migrated the same way or its
+  experiments re-run from scratch.
+
 ## 2026-07-14 — Whitespace normalization before BPE
 
 - **New preprocessing step**: `bpe.normalize_whitespace()` runs as the first

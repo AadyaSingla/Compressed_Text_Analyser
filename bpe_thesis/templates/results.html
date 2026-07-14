@@ -5,13 +5,13 @@
   <div class="actions">
     <a class="btn" href="{{ url_for('report', ihash=ihash) }}">Download results (PNG)</a>
   </div>
-  <img class="plot" src="{{ url_for('plot', ihash=ihash) }}" alt="Compression ratio and vocabulary size vs k">
+  <img class="plot" src="{{ url_for('plot', ihash=ihash) }}" alt="Compression utility and vocabulary size vs k">
 
   <table>
     <tr>
       <th class="num">k</th><th class="num">Merges applied</th><th class="num">Chars</th>
       <th class="num">Tokens</th><th class="num">Vocab</th>
-      <th class="num">Ratio</th><th>Longest token</th>
+      <th class="num">Utility</th><th>Longest token</th>
     </tr>
     {% for r in rows %}
     <tr>
@@ -20,7 +20,7 @@
       <td class="num">{{ r['original_chars'] }}</td>
       <td class="num">{{ r['token_count'] }}</td>
       <td class="num">{{ r['vocab_size'] }}</td>
-      <td class="num">{{ '%.3f' % r['compression_ratio'] }}</td>
+      <td class="num">{{ r['utility'] }}</td>
       <td><code>{{ r['longest_token'] }}</code></td>
     </tr>
     {% endfor %}

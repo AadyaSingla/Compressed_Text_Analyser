@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS experiments (
     original_chars INTEGER NOT NULL,
     token_count INTEGER NOT NULL,
     vocab_size INTEGER NOT NULL,
-    compression_ratio REAL NOT NULL,
+    utility INTEGER NOT NULL,
     longest_token TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (input_string, k)
@@ -55,7 +55,7 @@ def save_experiment(conn, label, text, stats):
     conn.execute(
         """INSERT INTO experiments
            (label, input_hash, input_string, k, merges_applied, original_chars,
-            token_count, vocab_size, compression_ratio, longest_token)
+            token_count, vocab_size, utility, longest_token)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             label,
@@ -66,7 +66,7 @@ def save_experiment(conn, label, text, stats):
             stats["original_chars"],
             stats["token_count"],
             stats["vocab_size"],
-            stats["compression_ratio"],
+            stats["utility"],
             stats["longest_token"],
         ),
     )
