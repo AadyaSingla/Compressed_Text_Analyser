@@ -7,6 +7,22 @@ project evolves.)
 
 ---
 
+## 2026-07-14 — Whitespace normalization before BPE
+
+- **New preprocessing step**: `bpe.normalize_whitespace()` runs as the first
+  line of `analyse()`, before training, so it applies uniformly to every k
+  value and every input source (pasted text, uploads, samples) with no changes
+  to `app.py`, `db.py`, or the templates.
+- Every run of spaces/tabs collapses to a single space
+  (`re.sub(r'[ \t]+', ' ', text)`), and any sequence of blank lines collapses
+  to a single newline (`re.sub(r'\n[ \t]*\n+', '\n', text)`). Leading/trailing
+  whitespace of the whole text is *not* stripped and non-whitespace characters
+  are untouched.
+- **Deliberate trade-off**: the raw multi-space/tab indentation structure of
+  source-code inputs is intentionally *not* preserved. Compression ratio and
+  vocabulary size should measure textual/content redundancy, not formatting
+  artifacts like indentation depth or tabs-vs-spaces style.
+
 ## 2026-07-13 — Ratio inverted to tokens/chars; downloadable report
 
 - **Compression ratio is now `tokens / chars`** (was `chars / tokens`): 1.0 =

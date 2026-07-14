@@ -4,7 +4,16 @@ Trains BPE from characters upward: repeatedly merges the most frequent
 adjacent token pair, k times (or until no pair occurs at least twice).
 """
 
+import re
 from collections import Counter
+
+
+def normalize_whitespace(text):
+    """Collapse horizontal whitespace runs and blank lines before analysis."""
+    # Intentionally discards indentation depth/style so stats reflect content redundancy, not formatting artifacts.
+    text = re.sub(r'[ \t]+', ' ', text)
+    text = re.sub(r'\n[ \t]*\n+', '\n', text)
+    return text
 
 
 def _merge_pair(tokens, pair):
@@ -44,6 +53,7 @@ def train_bpe(text, k):
 
 def analyse(text, k):
     """Train BPE with k merges and return a stats dict for the experiment."""
+    text = normalize_whitespace(text)
     tokens, merges = train_bpe(text, k)
     original_len = len(text)
     token_count = len(tokens)
@@ -54,7 +64,7 @@ def analyse(text, k):
         "original_chars": original_len,
         "token_count": token_count,
         "vocab_size": vocab_size,
-        "compression_ratio": original_len / token_count if token_count else 0.0,
+        "compression_ratio": token_count / original_len if original_len else 0.0,
         "longest_token": max((t for t in set(tokens)), key=len, default=""),
         "merges": merges,
     }
