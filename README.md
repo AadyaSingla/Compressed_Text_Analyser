@@ -1,6 +1,7 @@
 
 
 
+
 # Compressed Text Analyser
 
 A small web app for running **Byte Pair Encoding (BPE)** experiments on any text.
@@ -121,7 +122,7 @@ Take `"banana bandana"` with k = 3:
 
 Note round 1: `(a,n)` and `(n,a)` overlap in `banana`, and the left-to-right
 rule (rule 6) resolves it — `(a,n)` is counted 4 times but after merging, the
-`n,a` pairs are gone. After 3 merges: 14 characters → 6 tokens, ratio 2.33,
+`n,a` pairs are gone. After 3 merges: 14 characters → 6 tokens, ratio 0.43,
 vocab {`ban`,`ana`,`an`,`d`,`␣`} = 5, longest token `ana`.
 
 ## What the app measures, and why
@@ -138,7 +139,7 @@ from that before/after comparison:
 | **Chars** | `len(text)` — characters in the original input. | The baseline. It's also the token count at k = 0, which anchors the compression ratio at exactly 1.0. |
 | **Tokens** | `len(tokens)` — tokens remaining after all merges. | The direct measure of compression: every successful merge round removes one token per occurrence of the winning pair. |
 | **Vocab** | `len(set(tokens))` — number of *distinct* tokens in the final list. | The cost side of the trade-off. Compressing isn't free: each merge can add a new symbol you'd need in your "dictionary" to decode the text. Real tokenizers care about exactly this number (vocabulary size). |
-| **Ratio** | `chars / tokens` (0 for empty input). | The headline number: average characters per token. 1.0 = untouched; 4.0 = each token stands for 4 characters on average. It is a *lossless* measure — the original text is always exactly recoverable from the tokens. |
+| **Ratio** | `tokens / chars` (0 for empty input). | The headline number: how much of the original length remains. 1.0 = untouched; 0.25 = the text shrank to a quarter of its length (each token stands for 4 characters on average) — lower means better compression. It is a *lossless* measure — the original text is always exactly recoverable from the tokens. |
 | **Longest token** | The longest string in the final vocabulary. | A qualitative window into what BPE learned. In prose it's usually a frequent word with its space (`the `); in code it can be a whole keyword or repeated snippet (`def `, `return `). If it looks surprising, it tells you something about the text's repetitiveness. |
 
 ### Why sweep over k instead of running once?
@@ -148,7 +149,7 @@ is. With a **sweep step**, the app runs k = 0, step, 2·step, … up to your k
 (k = 0 included on purpose, so the plot starts from the ratio-1.0 baseline),
 and the results page plots two curves:
 
-- **Compression ratio vs k** rises steeply at first — the earliest merges grab
+- **Compression ratio vs k** falls steeply at first — the earliest merges grab
   the most frequent pairs, which remove the most tokens — and then flattens as
   only rare pairs are left. Classic diminishing returns.
 - **Vocabulary size vs k** climbs roughly one token per merge until the early
@@ -214,7 +215,7 @@ bpe_thesis/
 
 ## Reading the plots
 
-- **Compression ratio vs k**: rises quickly at first (the most frequent pairs
+- **Compression ratio vs k**: drops quickly at first (the most frequent pairs
   give the biggest wins), then flattens — classic diminishing returns.
 - **Vocabulary size vs k**: grows as merges add new tokens. Comparing the two
   curves shows the core BPE trade-off: *shorter text vs bigger vocabulary*.

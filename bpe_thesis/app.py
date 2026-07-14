@@ -123,7 +123,7 @@ def _draw_plots(ax1, ax2, rows):
 
     ax1.plot(ks, ratios, marker="o", color="#4058B0")
     ax1.set_xlabel("k (BPE merges)")
-    ax1.set_ylabel("Compression ratio (chars / tokens)")
+    ax1.set_ylabel("Compression ratio (tokens / chars)")
     ax1.set_title("Compression ratio vs k")
     ax1.grid(True, alpha=0.3)
 

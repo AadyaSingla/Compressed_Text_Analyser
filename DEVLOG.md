@@ -7,6 +7,18 @@ project evolves.)
 
 ---
 
+## 2026-07-13 — Ratio inverted to tokens/chars; downloadable report
+
+- **Compression ratio is now `tokens / chars`** (was `chars / tokens`): 1.0 =
+  uncompressed, lower = better compression, so the ratio curve now *falls*
+  with k. Changed in `bpe.analyse()`, the plot axis label, README, and this
+  log; stored rows in `experiments.db` were recomputed in place from their
+  token/char counts (exact, no re-run needed).
+- Results page gained a **Download results (PNG)** button (`/report/<ihash>.png`):
+  both graphs plus the full stats table rendered into a single image, height
+  scaled to the row count. A CSV export route (`/download/<ihash>.csv`) exists
+  but is not linked in the UI.
+
 ## 2026-07-13 — Documentation pass
 
 - Added this dev log and a README explaining BPE, every stat the app reports,
@@ -85,7 +97,7 @@ project evolves.)
   GPT tokenizers) — simpler, and fine for text analysis purposes.
 - `analyse()` wraps training and returns the stats dict that maps 1:1 onto a
   database row: k, merges applied, char count, token count, vocab size,
-  compression ratio (chars/tokens, guarded against division by zero for empty
+  compression ratio (tokens/chars, guarded against division by zero for empty
   input), and the longest learned token.
 
 ## Step 0 — Project setup
