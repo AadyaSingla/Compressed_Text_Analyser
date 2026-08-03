@@ -7,6 +7,44 @@ project evolves.)
 
 ---
 
+## 2026-08-03 — Added a JSON API with Swagger docs
+
+- **New `/api/...` blueprint (`api.py`), alongside the existing HTML pages.**
+  The original routes in `app.py` render Jinja templates from form
+  submissions; they aren't a fit for API documentation since they don't speak
+  JSON. Rather than force Swagger onto HTML routes, the same underlying
+  operations (run an analysis, list inputs, fetch results, delete an input)
+  are now also exposed as JSON endpoints: `POST /api/experiments`,
+  `GET /api/inputs`, `GET /api/results/<ihash>`, `DELETE /api/inputs/<ihash>`.
+- **`flasgger` serves interactive docs at `/apidocs/`.** Each route's
+  docstring carries a YAML OpenAPI spec that flasgger picks up automatically,
+  so the docs stay next to the code they describe instead of a separate spec
+  file that can drift.
+- **Shared constants moved to `config.py`.** `DATA_DIR`, `SAMPLES`,
+  `MAX_INPUT_CHARS`, and `MAX_K` were defined in `app.py`; both `app.py` and
+  the new `api.py` need them, and `api.py` importing from `app.py` would be
+  circular (`app.py` also imports the blueprint from `api.py` to register
+  it). Pulling the constants into their own module breaks the cycle.
+- **`requirements.txt` added.** The project had no dependency manifest before
+  this; `flasgger` is now a real dependency, so `Flask` and `flasgger` are
+  both pinned to the versions installed in `.venv`.
+
+## 2026-07-20 — Flattened the `bpe_thesis/` folder to the project root
+
+- **Removed the `bpe_thesis/` layer entirely.** `app.py`, `bpe.py`, `db.py`,
+  `templates/`, `data/`, and `experiments.db` now live directly at the project
+  root. The subfolder was never a real Python package (no `__init__.py`, and
+  the modules imported each other flat as `import bpe` / `import db`), so it was
+  organizational only — a container that the code inside didn't actually use.
+- **`main.py` lost its `sys.path` hack.** With the modules at the root, the
+  `sys.path.insert(0, .../bpe_thesis)` line is unnecessary, so `main.py` is now
+  just `from app import app` plus the `app.run(...)` call. The run command is
+  unchanged: `.venv/bin/python main.py` from the project root.
+- **No code logic changed.** `app.py` and `db.py` locate `data/`,
+  `templates/`, and `experiments.db` via `Path(__file__).parent`, which now
+  resolves to the root — so uploads, samples, and the database keep working with
+  no edits. Only file locations and the docs moved; the app behaves identically.
+
 ## 2026-07-14 — Compression ratio replaced by compression utility
 
 - **The headline metric is now compression utility** `U(s,k) = |s| − |s_k|` —
