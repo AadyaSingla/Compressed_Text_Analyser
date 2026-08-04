@@ -1,7 +1,8 @@
 """SQLite store for BPE experiments.
 
-Rows are unique on (input_string, k): re-running the same text with the
-same merge count reuses the stored row instead of inserting a duplicate.
+Rows are unique on (input_string, k, category): re-running the same text
+with the same merge count and category reuses the stored row instead of
+inserting a duplicate.
 """
 
 import hashlib
@@ -14,6 +15,8 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS experiments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     label TEXT NOT NULL,
+    category TEXT NOT NULL CHECK (category IN ('code', 'english')),
+    cleaned INTEGER NOT NULL CHECK (cleaned IN (0, 1)),
     input_hash TEXT NOT NULL,
     input_string TEXT NOT NULL,
     k INTEGER NOT NULL,
@@ -24,7 +27,7 @@ CREATE TABLE IF NOT EXISTS experiments (
     utility INTEGER NOT NULL,
     longest_token TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE (input_string, k)
+    UNIQUE (input_string, k, category)
 );
 CREATE INDEX IF NOT EXISTS idx_experiments_hash ON experiments (input_hash, k);
 """
@@ -41,24 +44,32 @@ def input_hash(text):
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
-def get_experiment(conn, text, k):
+def get_experiment(conn, text, k, category):
     return conn.execute(
-        "SELECT * FROM experiments WHERE input_string = ? AND k = ?", (text, k)
+        "SELECT * FROM experiments WHERE input_string = ? AND k = ? AND category = ?",
+        (text, k, category),
     ).fetchone()
 
 
-def save_experiment(conn, label, text, stats):
-    """Insert an experiment row, or return the existing one for (text, k)."""
-    existing = get_experiment(conn, text, stats["k"])
+def save_experiment(conn, label, category, cleaned, text, stats):
+    """Insert an experiment row, or return the existing one for
+    (text, k, category). `cleaned` is stored as provenance (was this text
+    produced by the Clean step) but isn't part of the uniqueness key —
+    cleaning a text changes the text itself, so a cleaned and a raw
+    version of the same source already get different `input_string`s and
+    never collide."""
+    existing = get_experiment(conn, text, stats["k"], category)
     if existing:
         return existing, False
     conn.execute(
         """INSERT INTO experiments
-           (label, input_hash, input_string, k, merges_applied, original_chars,
-            token_count, vocab_size, utility, longest_token)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           (label, category, cleaned, input_hash, input_string, k, merges_applied,
+            original_chars, token_count, vocab_size, utility, longest_token)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             label,
+            category,
+            int(cleaned),
             input_hash(text),
             text,
             stats["k"],
@@ -71,23 +82,24 @@ def save_experiment(conn, label, text, stats):
         ),
     )
     conn.commit()
-    return get_experiment(conn, text, stats["k"]), True
+    return get_experiment(conn, text, stats["k"], category), True
 
 
 def list_inputs(conn):
-    """One summary row per distinct input, newest first."""
+    """One summary row per distinct (input, category), newest first."""
     return conn.execute(
-        """SELECT input_hash, label, original_chars,
+        """SELECT input_hash, category, cleaned, label, original_chars,
                   COUNT(*) AS runs, MAX(k) AS max_k, MAX(created_at) AS last_run
            FROM experiments
-           GROUP BY input_hash
+           GROUP BY input_hash, category
            ORDER BY last_run DESC"""
     ).fetchall()
 
 
 def rows_for_input(conn, ihash):
     return conn.execute(
-        "SELECT * FROM experiments WHERE input_hash = ? ORDER BY k", (ihash,)
+        "SELECT * FROM experiments WHERE input_hash = ? ORDER BY category, k",
+        (ihash,),
     ).fetchall()
 
 

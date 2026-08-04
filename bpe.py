@@ -4,7 +4,51 @@ Trains BPE from characters upward: repeatedly merges the most frequent
 adjacent token pair, k times (or until no pair occurs at least twice).
 """
 
+import re
 from collections import Counter
+
+
+def normalize_whitespace(text):
+    """Prose cleaning for category "english": newlines become spaces (word
+    breaks, not structure), punctuation/symbols are stripped entirely,
+    whitespace runs collapse to one space, and case is flattened. Word
+    boundaries are the only whitespace that survives."""
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+    text = text.replace('\n', ' ')
+    text = re.sub(r'[^a-zA-Z0-9 \t]', '', text)
+    text = re.sub(r'[ \t]+', ' ', text)
+    text = text.strip()
+    return text.lower()
+
+
+def normalize_code(text):
+    """Cleaning for category "code": preserve everything structurally
+    significant to Python — leading indentation (beyond tabs->4-spaces),
+    blank lines, punctuation/operators, case, comments, docstrings.
+    Only: standardize line endings, expand indentation tabs to 4 spaces
+    (so tab- and space-indented code don't look different to BPE), collapse
+    space runs after the indentation (spacing between symbols carries no
+    meaning), and strip trailing whitespace. String-literal contents are
+    not special-cased — distinguishing them reliably isn't worth the
+    complexity here, so BPE just compresses whatever spacing survives."""
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+    cleaned_lines = []
+    for line in text.split('\n'):
+        line = line.rstrip(' \t')
+        rest = line.lstrip(' \t')
+        indent = line[: len(line) - len(rest)].replace('\t', '    ')
+        rest = re.sub(r' {2,}', ' ', rest)
+        cleaned_lines.append(indent + rest)
+    return '\n'.join(cleaned_lines)
+
+
+def normalize(text, category):
+    """Dispatch to the category-appropriate cleaning rules."""
+    if category == "english":
+        return normalize_whitespace(text)
+    if category == "code":
+        return normalize_code(text)
+    raise ValueError(f"unknown category: {category!r}")
 
 
 def _merge_pair(tokens, pair):
@@ -43,7 +87,11 @@ def train_bpe(text, k):
 
 
 def analyse(text, k):
-    """Train BPE with k merges and return a stats dict for the experiment."""
+    """Train BPE with k merges and return a stats dict for the experiment.
+
+    Takes `text` exactly as given — cleaning, if wanted, is a separate
+    step the caller applies beforehand (see `normalize()`), not something
+    this function does implicitly."""
     tokens, merges = train_bpe(text, k)
     original_len = len(text)
     token_count = len(tokens)

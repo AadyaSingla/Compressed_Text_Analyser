@@ -11,6 +11,7 @@ Built as part of a thesis on compressed text analysis.
 
 
 
+claude
 
 ---
 
@@ -157,9 +158,12 @@ merged, when it stops, and how ties and edge cases are handled:
 ## What the app measures
 
 For each run (one input text + one value of k) the app calls
-`bpe.analyse(text, k)`, which trains BPE and then compares the token list
-*after* merging with the text *before* merging. Everything reported comes
-from that before/after comparison:
+`bpe.analyse(text, k)`, which trains BPE on `text` exactly as given and
+then compares the token list *after* merging with the text *before*
+merging. Whether `text` has been cleaned first is decided entirely
+upstream of this call (see "Cleaning is a separate step," below) —
+`analyse()` itself has no opinion on it. Everything reported comes from
+that before/after comparison:
 
 | Term | How it's computed | Why it matters |
 |---|---|---|
@@ -292,14 +296,61 @@ browser.
   incremental counters — but the naive version is simple to verify by hand
   and comfortably handles this app's 200k-char / k ≤ 2000 limits.
 
+- **`normalize_whitespace(text)` / `normalize_code(text)` / `normalize(text,
+  category)`** — cleaning rules that run before training, chosen by
+  `category` rather than applied uniformly, because code and prose have
+  different notions of "noise."
+
+  `normalize_whitespace` (`category="english"`) reduces the text to
+  `[a-z0-9]` words separated by exactly one space: line endings become
+  spaces (not removed — a line break is usually just wrapping, not
+  meaningful structure, so words on either side of it must stay
+  separated); every character that isn't a letter, digit, space, or tab
+  is stripped (punctuation, quotes, brackets, dashes, …); whitespace runs
+  collapse to one space; the whole text is trimmed and lowercased.
+
+  `normalize_code` (`category="code"`) preserves everything structurally
+  or semantically significant to source: leading indentation (beyond
+  expanding tabs to 4 spaces, so tab- and space-indented code look
+  identical to BPE), blank lines (never merged or removed — a change
+  from an earlier version of this function, which used to collapse 3+
+  blank lines; that turned out to destroy information a user comparing
+  code compression might actually want), punctuation/operators, case,
+  comments, and docstrings. It only standardizes line endings, expands
+  indentation tabs, collapses space runs *after* the indentation
+  (`x   =   1` → `x = 1` — inter-symbol spacing carries no meaning), and
+  strips trailing whitespace. It does not special-case string-literal
+  contents — reliably telling "inside a string" from "outside a string"
+  needs real parsing, not a regex, so a string literal's internal spacing
+  gets collapsed like anywhere else; BPE just compresses whatever
+  survives instead of the rule trying to protect it.
+
+  `normalize()` is a thin dispatcher between the two, raising on any
+  other category value.
+
+  **Cleaning is a separate step, not something `analyse()` does.** Earlier
+  versions of this app had `analyse()` normalize internally behind a
+  `clean` flag, which made "cleaned" part of an experiment's stored
+  identity alongside `category` and let one raw input balloon into up to
+  four rows (two categories × cleaned/raw). That's gone: `normalize()` is
+  called explicitly, by the `/clean` route (see `app.py` below) or by an
+  API caller, *before* any text ever reaches `analyse()`. Cleaning and
+  analysing are two unrelated actions on two potentially-different pieces
+  of text, not two modes of the same action.
+
 - **`analyse(text, k)`** — the bridge between algorithm and application:
-  trains BPE, then derives every reported stat from the before/after
-  comparison. It exists as its own function (rather than letting `app.py`
-  call `train_bpe` directly) so there is exactly one place in the codebase
-  that defines what each number means — `utility` is
-  `original_len - token_count`, computed here and nowhere else.
+  trains BPE on `text` exactly as given, then derives every reported stat
+  from the before/after comparison. It exists on its own (rather than
+  letting `app.py` call `train_bpe` directly) so there is exactly one
+  place in the codebase that defines what each number means — `utility`
+  is `original_len - token_count`, computed here and nowhere else.
   `longest_token` uses `max(..., default="")` so an empty input yields an
-  empty string instead of a crash.
+  empty string instead of a crash. `original_len` is always `len(text)`
+  for whatever was actually passed in — since cleaning happens (or
+  doesn't) before this function is ever called, a cleaned and a raw
+  version of the same source simply arrive as two different strings with
+  two different lengths, rather than this function needing to know or
+  care which one it's looking at.
 
 ### `db.py` — storage (the experiment ledger)
 
@@ -308,11 +359,27 @@ non-duplicated**: every run ever made is queryable, and re-running never
 creates a second copy. SQLite was chosen because it's a single file with
 zero setup.
 
-- **The schema** — one table, `experiments`, one row per (input, k) run,
-  with every stat as a column. `UNIQUE (input_string, k)` enforces
-  no-duplicate-experiments at the database level, as a backstop behind the
-  application-level check. `CREATE INDEX ... ON (input_hash, k)` makes "all
-  rows for this input, ordered by k" — the query every page needs — fast.
+- **The schema** — one table, `experiments`, one row per (input, k,
+  category) run, with every stat as a column. `category` is a required,
+  validated enum (`'code'` or `'english'`, enforced by a `CHECK`
+  constraint) that the user picks explicitly at submission time — it's
+  never inferred from the text. `cleaned` is a 0/1 flag (also
+  `CHECK`-constrained) recording whether the stored text passed through
+  the cleaning rules before this row was saved — pure provenance, kept so
+  the results page can label a plot "Cleaned" or "Raw." Both `category`
+  and `cleaned` are distinct from `label`, which stays a free-text,
+  purely cosmetic handle with no effect on results — but only `category`
+  is part of an experiment's *identity*. `cleaned` deliberately is **not**
+  in the `UNIQUE` constraint: cleaning a text changes the text itself
+  (that's the whole point of `/clean` — see `app.py` below), so a cleaned
+  and a raw version of the same source already have different
+  `input_string`s and can never collide even without `cleaned` in the
+  key. `UNIQUE (input_string, k, category)` enforces no-duplicate-
+  experiments at the database level, as a backstop behind the
+  application-level check — the same text can still legitimately be
+  analysed under both categories, so `category` stays in the uniqueness
+  key. `CREATE INDEX ... ON (input_hash, k)` makes "all rows for this
+  input, ordered by k" — the query every page needs — fast.
 
 - **`connect()`** — opens the connection, sets `row_factory = sqlite3.Row`
   (so templates can say `r['utility']` instead of a tuple index), and runs
@@ -323,25 +390,35 @@ zero setup.
 - **`input_hash(text)`** — first 16 hex characters of the SHA-256 of the
   text. This is the app's addressing scheme: results pages live at
   `/results/<ihash>`, so the same text pasted twice (even under different
-  labels) hashes to the same address and lands on the same results page.
+  labels or categories) hashes to the same address and lands on the same
+  results page — a hash's results page can therefore show rows from both
+  categories side by side, though never a mix of cleaned and raw, since
+  those are different text and so different hashes entirely.
 
-- **`get_experiment(conn, text, k)`** — exact-match lookup used for dedup,
-  matched on the full `input_string`, not the hash, so a hash collision
-  could never cause one text's results to silently overwrite another's.
+- **`get_experiment(conn, text, k, category)`** — exact-match lookup used
+  for dedup, matched on the full `input_string` plus `k` and `category`,
+  not the hash, so a hash collision could never cause one text's results
+  to silently overwrite another's.
 
-- **`save_experiment(conn, label, text, stats)`** — check-then-insert,
-  returning a `(row, created)` pair. `app.py` sums the boolean across a
-  sweep to report "N new, M already stored" in the flash message.
+- **`save_experiment(conn, label, category, cleaned, text, stats)`** —
+  check-then-insert, returning a `(row, created)` pair. `app.py` sums the
+  boolean across a sweep to report "N new, M already stored" in the flash
+  message. `cleaned` is stored but, per above, plays no role in the
+  check — it's just carried along for display.
 
-- **`list_inputs(conn)`** — one `GROUP BY input_hash` query that powers the
-  home page's "stored inputs" table (run count, max k, last-run time),
-  newest-first.
+- **`list_inputs(conn)`** — one `GROUP BY input_hash, category` query that
+  powers the home page's "stored inputs" table (run count, max k, last-run
+  time), newest-first. The same text run under both categories appears as
+  two rows here, since the stats genuinely differ per category.
 
-- **`rows_for_input(conn, ihash)`** — all runs for one input, `ORDER BY k`,
-  which is what lets the results table read left-to-right in increasing k.
+- **`rows_for_input(conn, ihash)`** — all runs for one input,
+  `ORDER BY category, k`, which is what lets the results table read
+  left-to-right in increasing k within each category's block, rather than
+  interleaving the two categories when a hash has both.
 
 - **`delete_input(conn, ihash)`** — deletes every run for an input hash at
-  once. There's deliberately no per-row delete — the meaningful unit of
+  once, across both categories if the hash has rows in both. There's
+  deliberately no per-row or per-category delete — the meaningful unit of
   work in this app is "an input and its whole sweep," not an individual row.
 
 ### `app.py` — the Flask layer
@@ -353,14 +430,20 @@ envelope — the naive O(n)-per-merge algorithm stays comfortably fast inside
 these caps.
 
 - **`_resolve_input()`** — turns the three input mechanisms (paste, upload,
-  sample) into one `(label, text)` pair, with priority **sample > upload >
-  paste**. Uploads are decoded as UTF-8 with `errors="replace"`, so a
-  binary or oddly-encoded file degrades into replacement characters instead
-  of a server error. A copy of every upload is kept in `data/uploads/` so
-  the exact file behind an experiment can be revisited later. The label for
-  pasted text is just its first 30 characters — the label is only a
-  human-friendly handle; the text's content hash is what actually identifies
-  it.
+  sample) into a `(label, text, category)` triple, with priority
+  **sample > upload > paste**. Uploads are decoded as UTF-8 with
+  `errors="replace"`, so a binary or oddly-encoded file degrades into
+  replacement characters instead of a server error. A copy of every upload
+  is kept in `data/uploads/` so the exact file behind an experiment can be
+  revisited later. The label for pasted text is just its first 30
+  characters — the label is only a human-friendly handle; the text's
+  content hash is what actually identifies it. `category` comes from a
+  required form field and is read the same way regardless of input source
+  — even when a sample is picked, the user still has to explicitly select
+  a category (the two bundled samples happen to match their own category,
+  but nothing stops picking the code sample and analysing it as English,
+  or vice versa, deliberately). Both `run()` and `clean()` reject the
+  request with a flash message if `category` isn't `"code"` or `"english"`.
 
 - **`_parse_ks()`** — converts the form's k and step into the list of k
   values to run. `step = 0` means a single run at `k`; `step > 0` means
@@ -368,22 +451,56 @@ these caps.
   always include the utility-0 baseline. Out-of-range values are clamped
   (`max(0, min(k_max, MAX_K))`) rather than rejected.
 
-- **`index()`** — the home page: one query for the stored-inputs list,
-  render.
+- **`index()` / `_render_index(**prefill)`** — the home page: one query for
+  the stored-inputs list, plus optional keyword args (`prefill_text`,
+  `prefill_category`, `prefill_cleaned`, `prefill_k_max`, `prefill_k_step`)
+  that populate the form when it's being re-rendered right after a Clean
+  action rather than loaded fresh. `index()` itself just calls
+  `_render_index()` with no prefill.
 
-- **`run()`** — the POST handler and the app's one real "controller." It
-  resolves the input, validates it (empty, too large, non-numeric k — each
-  with a flash message and a redirect rather than a server error), then for
-  each k in the sweep checks the database first and skips work already
-  done. This check-before-compute loop is what makes sweeps incremental: a
-  second sweep with a finer step only computes the new k values, and
-  identical re-runs cost one `SELECT` each. It finishes by redirecting to
-  `/results/<hash-of-text>` — the content hash, not a row id — so refreshing
-  the results page never re-submits the form.
+- **`clean()`** — `POST /clean`, a sibling to `run()` that shares its
+  input-resolution and validation but does something different with the
+  result: it calls `bpe.normalize(text, category)` and re-renders the
+  *index* page with the cleaned text sitting in the textarea (via
+  `_render_index`), rather than saving anything or redirecting anywhere.
+  Nothing is written to the database — cleaning is a preview/transform
+  step the user can inspect before deciding to analyse. The re-rendered
+  form also carries a hidden `was_cleaned=1` field, so if the user then
+  clicks **Run analysis** on that same page, `run()` knows the text in the
+  box has already been cleaned (purely for the `cleaned` column's sake —
+  it doesn't change how `run()` processes the text).
+
+- **`run()`** — the POST handler for **Run analysis**, and the app's one
+  real "controller" for actually producing results. It resolves the
+  input, validates it (empty, too large, non-numeric k — each with a
+  flash message and a redirect rather than a server error), reads the
+  `was_cleaned` hidden field (defaulting to not-cleaned if absent — it's
+  provenance, not a required choice), then for each k in the sweep checks
+  the database first and skips work already done. This check-before-
+  compute loop is what makes sweeps incremental: a second sweep with a
+  finer step only computes the new k values, and identical re-runs cost
+  one `SELECT` each. Crucially, `run()` never calls `bpe.normalize()`
+  itself — whatever text `_resolve_input()` hands it is exactly what gets
+  analysed, cleaned or not. It finishes by redirecting to
+  `/results/<hash-of-text>` — the content hash, not a row id — so
+  refreshing the results page never re-submits the form.
 
 - **`results(ihash)`** — fetches the rows (404 if the hash is unknown — the
-  honest answer for a stale bookmark after a delete) and renders the table
-  plus a 400-character preview of the input.
+  honest answer for a stale bookmark after a delete) and renders the table,
+  the plot, and a 400-character preview of the input.
+
+- **`plot(ihash)`** — `GET /plot/<ihash>.png`, streamed from memory
+  (`io.BytesIO`, nothing written to disk). Two side-by-side matplotlib
+  charts — compression utility vs k, and vocabulary size vs k — built with
+  `matplotlib.use("Agg")` set before `pyplot` is imported (the app runs
+  headless; without this, Flask can crash on macOS). Rows are grouped by
+  `category` first, so a hash with rows in both categories draws one line
+  per category (with a legend), rather than one line zig-zagging between
+  two different curves. The figure's title carries the *only* place
+  "Cleaned"/"Raw" is mentioned anywhere in the UI — `rows[0]["cleaned"]`,
+  since every row on one hash shares the same cleaned state (they're
+  necessarily the same underlying text). Each figure is `plt.close()`d
+  after saving to avoid leaking memory across requests.
 
 - **`delete(ihash)`** — POST-only, because anything that destroys data must
   never be reachable by a GET (browsers and crawlers can prefetch links). A
@@ -400,15 +517,32 @@ nothing.
   The `.num` class right-aligns numbers with `font-variant-numeric:
   tabular-nums`, since the UI is mostly tables of numbers meant to be
   compared down a column.
-- **`index.html`** — one form containing all three input methods plus the k
-  and step fields, and the stored-inputs table with per-input delete
-  buttons. Keeping paste/upload/sample in a single form (rather than tabs)
-  is what makes the fixed priority order in `_resolve_input()` the only
-  conflict-resolution logic needed.
-- **`results.html`** — the stats table (one row per k) and the input
-  preview. The template contains loops and output only — every number it
-  prints was computed in `bpe.py` and stored by `db.py`, so the view layer
-  can't introduce a discrepancy.
+- **`index.html`** — one form containing all three input methods, a
+  required category radio group (Source code / English language), the k
+  and step fields, and two submit buttons — **Clean** and **Run
+  analysis** — that post to two genuinely different endpoints (`/clean`
+  and `/run`) via HTML's `formaction` attribute rather than sharing one
+  endpoint distinguished by a value, so they read as the separate actions
+  they are. The textarea, category radios, and k/step fields all accept
+  optional `prefill_*` template variables so the form can be re-rendered
+  with the just-cleaned text in place after a Clean action, without
+  needing a redirect or session storage. Below the form, the stored-inputs
+  table has a Category column and per-input delete buttons — no Cleaned
+  column; that only shows up as a word on the results-page plot (see
+  `plot()` in `app.py` above). Keeping paste/upload/sample in a single
+  form (rather than tabs) is what makes the fixed priority order in
+  `_resolve_input()` the only conflict-resolution logic needed.
+- **`results.html`** — the plot (`<img src="{{ url_for('plot', ihash=ihash) }}">`),
+  the stats table (one row per k, plus a Category column since a single
+  input hash can have rows spanning both categories), and the input
+  preview. The preview's truncation indicator is computed in `app.py`'s
+  `results()` route from the raw stored text's length
+  (`len(input_string) > 400`) rather than from any one row's
+  `original_chars`, since that number can still vary by category and
+  isn't a reliable proxy for the raw text's length. The template otherwise
+  contains loops and output only — every number it prints was computed in
+  `bpe.py` and stored by `db.py`, so the view layer can't introduce a
+  discrepancy.
 
 ### `data/`
 
@@ -437,20 +571,44 @@ Dependency: Flask (already installed in `.venv`). The SQLite database
 1. Provide text one of three ways: **paste** it, **upload** a file, or pick
    a built-in **sample** (English prose or Python code). If more than one is
    given, priority is: sample → upload → pasted text.
-2. Choose **k** (max merges, up to 2000) and optionally a **sweep step**
+2. Choose a **category** — Source code or English language. This is
+   required and never inferred: it decides which cleaning rules the Clean
+   button would apply (indentation is preserved for code, collapsed for
+   English prose).
+3. Choose **k** (max merges, up to 2000) and optionally a **sweep step**
    (0 means a single run at k).
-3. Click **Run analysis**. You land on the results page with a table of
-   every stored run for that input.
+4. Optionally click **Clean** first — it applies the category's cleaning
+   rules and puts the result back in the text box for you to check,
+   without running anything yet. Then click **Run analysis**, which runs
+   BPE on whatever's currently in the box, cleaned or not. You land on the
+   results page with a graph and a table of every stored run for that
+   exact text.
 
 Limits: input up to 200,000 characters, k up to 2000.
 
+To compare cleaned vs. raw, or one category's cleaning against the
+other's, just run both: paste the same text, click **Run analysis**
+directly for the raw baseline, then reload the form, paste it again,
+click **Clean** then **Run analysis** for the cleaned version (or switch
+category first). Since cleaning changes the text, each combination lands
+on its own results page with its own graph — there's no single page that
+merges them, by design; compare the two pages side by side instead.
+
 ## Data storage and deduplication
 
-- Each experiment row is **unique on (input text, k)**. Re-running the same
-  text with the same k reuses the stored row instead of inserting a
-  duplicate — the flash message reports how many rows were new vs. already
-  stored.
+- Each experiment row is **unique on (input text, k, category)**.
+  Re-running the same text with the same k and category reuses the stored
+  row instead of inserting a duplicate — the flash message reports how
+  many rows were new vs. already stored. Category is part of this key
+  (not just `label`, which carries no such guarantee) because the same
+  text produces different stats under each category's cleaning rules, so
+  the same text can deliberately be run under both to compare the effect.
+  `cleaned` is recorded per row but isn't part of this key — see below.
 - Inputs are grouped by a short **SHA-256 hash** of the text, so the same
-  text pasted twice (even with different labels) lands on the same results
-  page.
-- Deleting an input removes **all** of its stored runs.
+  text pasted twice — even under different labels or categories — lands
+  on the same results page, which can then show rows from both categories
+  side by side. A cleaned and a raw run are never on the same page: since
+  cleaning changes the text, they hash differently and get separate
+  results pages, each with its own graph.
+- Deleting an input removes **all** of its stored runs, across both
+  categories if the hash has rows in both.

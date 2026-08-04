@@ -7,6 +7,235 @@ project evolves.)
 
 ---
 
+## 2026-08-04 — Decoupled Clean from Analyse; graphs restored
+
+- **Why, for the button redesign**: the previous "Run analysis (raw)" /
+  "Clean" pair (same form, same `/run` endpoint, distinguished by a
+  `clean` value) made `cleaned` part of an experiment's identity alongside
+  `category`, which meant one raw hash could fan out into up to 4 stored
+  rows (2 categories × 2 cleaned states) all sharing the same results
+  page. That was reported back as unwanted complexity — cleaned and raw
+  are "completely separate metrics," not two options of the same run, and
+  nothing needed 4 hashes for one input. Fixed by making cleaning and
+  analysis genuinely separate actions instead of two branches of one:
+  - **`POST /clean`** (new route, `bpe.py`'s existing `normalize()`) takes
+    whatever text/category the form currently holds, cleans it, and
+    re-renders the *same* index page with the cleaned text sitting in the
+    textarea for review — it does not touch the database or run BPE.
+  - **`POST /run`** ("Run analysis") just runs BPE on whatever text is in
+    the box at that moment, full stop — no clean/raw branching inside it
+    at all. If the box holds cleaned text (because Clean was clicked
+    first), that's what gets analysed; if it holds the original text,
+    that's what gets analysed. `bpe.analyse(text, k)` lost its `category`
+    and `clean` parameters entirely — it went back to being a pure
+    "train BPE on this exact text" function, with cleaning fully external
+    to it now.
+  - Because cleaning now changes the actual text before it's ever saved,
+    a cleaned version and a raw version of the same source naturally get
+    **different `input_hash`es** — they were never the same experiment to
+    begin with, so there's no longer any reason for them to share one.
+    `cleaned` is still stored per row (so the UI can label it), but it's
+    dropped from the `UNIQUE` constraint — `(input_string, k, category)`,
+    same shape as before cleaned existed at all. One hash, one result set.
+  - The two buttons share one `<form>` via HTML's `formaction` attribute
+    (`Clean` points at `/clean`, `Run analysis` uses the form's default
+    `/run` action) — no JS needed, and both buttons still submit
+    text/file/sample/category/k together.
+  - **No mention of "cleaned"/"raw" in the tables anymore** — the
+    stored-inputs and results tables dropped the Cleaned column entirely.
+    The only place it shows up now is a single word ("Cleaned" or "Raw")
+    in the plot's title, since a plotted hash's rows always share one
+    cleaned state (they're the same underlying text) even though they can
+    still span two categories.
+
+- **Why, for the graphs**: turns out this app used to have them —
+  `/plot/<ihash>.png` (matplotlib, two side-by-side charts: compression
+  utility vs k, vocabulary size vs k) existed as of commit `014aa65` and
+  was intentionally dropped in `5783008` ("flatten `bpe_thesis/` to
+  project root... dropped the matplotlib-based plot/report/CSV routes")
+  when the JSON API was added — not a bug, just never brought back until
+  now. Restored the inline `/plot/<ihash>.png` route and the `<img>` on
+  `results.html`; skipped the old full-report-PNG and CSV-export routes
+  since only the inline graphs were asked for this time. One addition
+  the old version didn't need: since `category` (unlike `cleaned`) can
+  still span two rows on one hash, `/plot` now draws one line per
+  category present, with a legend only when there's more than one —
+  `matplotlib` is back in `requirements.txt` (it was already sitting
+  installed in the venv from before the drop, just undeclared).
+
+- **No migration needed for the schema shrink** (`cleaned` dropped from
+  `UNIQUE`): SQLite's `CREATE TABLE IF NOT EXISTS` still won't retroactively
+  loosen a constraint on an existing table any more than it would tighten
+  one, so `experiments.db` still needs deleting for the new schema to take
+  effect — same drill as every schema change so far in this project.
+
+## 2026-08-04 — Precise cleaning rules for code vs. english
+
+- **Why**: the earlier `normalize_code`/`normalize_whitespace` were
+  reasonable first passes but under-specified — in particular the old
+  `normalize_code` collapsed runs of 3+ blank lines, which turned out to
+  be an overreach (blank-line count between functions/blocks is something
+  a user studying code compression might actually want intact). This
+  entry replaces both functions with an exact, explicitly-specified rule
+  set per category, given directly by the project owner rather than
+  inferred, so the rationale below is "why this exact rule," not "why
+  cleaning at all" (see the two entries below for that).
+
+- **`normalize_code(text)` — rewritten, simpler and stricter about what it
+  preserves:**
+  1. `\r\n`/`\r` → `\n` (one newline convention).
+  2. **Blank lines are never touched** — no merging, no removal. This is
+     the one behavior actually removed from the old version; blank-line
+     structure is left entirely to the person/BPE run to deal with.
+  3. Tabs *in the leading indentation only* become 4 spaces, so
+     tab-indented and space-indented code stop looking different to BPE.
+  4. Leading spaces are otherwise left exactly as they are — Python's
+     nesting is encoded in them, so touching them would corrupt meaning.
+  5. After the indentation, runs of multiple spaces collapse to one
+     (`x   =   1` → `x = 1`) — inter-symbol spacing carries no meaning.
+  6. Trailing spaces/tabs on every line are stripped.
+  7. Punctuation, operators, case, comments, and docstrings are left
+     completely alone — none of them are noise in code.
+  - **Deliberately skipped**: distinguishing string-literal contents from
+    real code so their internal whitespace could be left alone. Reliably
+    telling "inside a string" from "outside a string" needs a real
+    tokenizer/parser, not a regex (nested quotes, triple-quoted strings,
+    escaped quotes, f-strings all break a naive approach) — not worth the
+    complexity for this tool. A string literal with padded spacing will
+    have that spacing collapsed like anywhere else; BPE just compresses
+    whatever spacing survives instead of the rule trying to protect it.
+  - Implementation: rather than one big regex, each line is split into
+    its leading-whitespace run and the rest, so the tab→4-spaces and
+    space-collapsing rules can be applied to exactly the right half of
+    the line without a lookbehind trying to do both at once.
+
+- **`normalize_whitespace(text)` (english) — rewritten around "only
+  letters, numbers, and single spaces survive":**
+  1. `\r\n`/`\r` → `\n`, **then every `\n` becomes a space** — in prose,
+     line breaks are usually just where the text wrapped, not meaningful
+     structure, so they're treated as word separators like any other
+     whitespace, not removed outright (removing them instead of spacing
+     them would glue words together across line breaks).
+  2. Every character that isn't a letter, digit, space, or tab is
+     stripped — commas, periods, quotes, brackets, dashes, colons, etc.
+     Tabs are deliberately kept alive through this step (not stripped
+     outright) so step 3 can still treat them as word separators; if they
+     were dropped here instead, a tab-separated pair of words would fuse
+     into one token.
+  3. Runs of spaces/tabs collapse to a single space.
+  4. Leading/trailing space is trimmed from the whole text.
+  5. Everything is lowercased.
+  - Net effect: the character stream is reduced to `[a-z0-9]` tokens
+    separated by exactly one space, so BPE sees spaces purely as word
+    boundaries with no punctuation or capitalization noise competing for
+    merges.
+
+- **No migration needed**: these are pure function-body changes with no
+  schema impact — existing `category`/`cleaned` rows are unaffected,
+  only what a *new* `clean=1` run produces changes. No need to touch
+  `experiments.db`.
+
+## 2026-08-04 — "Clean" button: raw vs. cleaned as a separate, comparable axis
+
+- **Why**: the category feature (previous entry) always cleaned before BPE,
+  so there was no way to see what the cleaning rules actually changed, or
+  to isolate that effect from the category choice itself. The goal is
+  direct comparison: cleaned vs. raw for the same text, and — since the
+  two categories' cleaning rules differ — how the two cleaning *processes*
+  (`normalize_code` vs. `normalize_whitespace`) differ from each other.
+  Getting there meant `cleaned` had to become part of an experiment's
+  identity (like `category` already is), not just a flag: otherwise a
+  cleaned run and a raw run of the same (text, k, category) would collide
+  under the old uniqueness constraint, and the second submission would be
+  silently deduped against the first instead of stored for comparison.
+- **Breaking change, done deliberately and visibly**: `bpe.analyse()`
+  used to always clean; going forward it takes a required `clean` bool
+  with no default, forcing every call site to choose explicitly. The
+  already-shipped "Run analysis" button is relabeled **"Run analysis
+  (raw)"** and now skips cleaning entirely — a new **"Clean"** button
+  (`clean=1`) is the explicit opt-in for the old behavior. This is a real
+  behavior change to an existing button, not purely additive, so the
+  label, the flash message ("...raw..."/"...cleaned..."), and this log
+  entry all call it out rather than changing it silently. The JSON API
+  gets a softer landing: `clean` defaults to `true` there, since API
+  callers who don't know about the new field should see no change.
+- **Schema**: `experiments.cleaned INTEGER NOT NULL CHECK (cleaned IN
+  (0,1))`; uniqueness is now `UNIQUE (input_string, k, category,
+  cleaned)`. `list_inputs` groups by `(input_hash, category, cleaned)` —
+  one hash can now show up to 4 summary rows (code×clean, code×raw,
+  english×clean, english×raw) — and `rows_for_input` orders by
+  `category, cleaned, k` so a results page renders as contiguous blocks
+  per combination instead of interleaving them.
+- **Known, accepted quirk**: when `clean=0`, category has zero effect on
+  the actual BPE run (raw text is identical either way), so `code`+raw
+  and `english`+raw rows for the same text are numerically identical,
+  just tagged with different categories. This is a direct consequence of
+  category being a user-declared identity field rather than an inferred
+  one, not a bug — a naive "raw vs raw across categories" comparison is a
+  no-op by construction; the meaningful raw/clean comparison is within
+  one category.
+- **Incidental fix**: `results.html`'s "…" truncation indicator used to
+  check `rows[0]['original_chars'] > 400`, but `original_chars` reflects
+  whichever text BPE actually saw (raw or normalized length, now varying
+  per row), not `len(input_string)`. `app.py`'s `results()` route now
+  computes the truncation flag directly from the raw stored text's length
+  instead.
+- **No migration script**: `experiments.db` deleted and recreated again,
+  same reasoning as the category change — local, gitignored, disposable.
+
+## 2026-08-04 — Required category (code / english) with per-category cleaning
+
+- **Why**: every input was cleaned with one uniform rule regardless of
+  content, but code and prose have different notions of "noise." In prose,
+  extra spaces and blank lines are meaningless and safe to collapse; in
+  code, indentation is often structurally significant (Python blocks) and
+  collapsing it would corrupt what BPE sees. Splitting the cleaning rules
+  by content type needed a category to dispatch on — and since detecting
+  "is this code or English" reliably is itself an unsolved problem, the
+  category is a required, explicit choice the user makes at submission
+  time (paste, upload, or sample), never inferred from the text.
+- **Investigation note**: while adding this, `bpe.py` on disk turned out to
+  have *no* whitespace-cleaning step at all, despite a prior commit history
+  entry ("Normalize whitespace before BPE analysis") describing one —
+  `git log -- bpe.py` shows it was apparently dropped during the later
+  "flatten `bpe_thesis/` to project root" commit. This change reintroduces
+  that cleaning step, now split by category, so the regression is fixed as
+  a side effect.
+- **`category` is part of an experiment's identity, not just a metadata
+  tag** (unlike the pre-existing `label` column, which stays purely
+  cosmetic/free-text and has no effect on results or uniqueness). Why: the
+  same raw text produces genuinely different stats depending on which
+  cleaning rules ran, so it can be legitimate to analyse the same text
+  under both categories on purpose (e.g. to see how much the category
+  choice itself changes compression). Making category part of the
+  uniqueness key — `UNIQUE (input_string, k, category)`, was
+  `(input_string, k)` — lets both tracks be stored side by side under the
+  same `input_hash` (hashing stays content-only) instead of the second
+  submission silently reusing the first's row. `list_inputs` now
+  `GROUP BY input_hash, category` and `rows_for_input` sorts
+  `ORDER BY category, k` so the two tracks render as separate blocks
+  rather than interleaved.
+- **`normalize_code(text)`** (new, `bpe.py`): preserves all leading/internal
+  spaces and tabs — only normalizes line endings, strips trailing per-line
+  whitespace, and collapses runs of 3+ blank lines to one (blank lines stay
+  meaningful block separators in code, so unlike the prose path they
+  aren't removed entirely). `normalize_whitespace` (collapse
+  horizontal-whitespace runs to one space, collapse blank-line runs to
+  nothing) is now used only for `category="english"`.
+- **No migration script**: `experiments.db` is local, gitignored,
+  disposable experiment data, so the pre-category database was simply
+  deleted (`rm experiments.db`) and recreated empty by
+  `CREATE TABLE IF NOT EXISTS` on next run — consistent with this
+  project's existing no-migration-tooling-at-this-size approach (see the
+  utility-column entry below). Anyone else running this app needs to do
+  the same `rm experiments.db`, since the old table lacks the new
+  `category` column and constraint.
+- **Note for later readers**: `original_chars` (and everything derived
+  from it) reflects the *normalized* text length, not the raw input
+  length — this was already true before this change, but is now more
+  visible, since `code` normalization preserves far more characters than
+  `english` normalization for the same raw input.
+
 ## 2026-08-03 — Added a JSON API with Swagger docs
 
 - **New `/api/...` blueprint (`api.py`), alongside the existing HTML pages.**

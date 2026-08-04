@@ -3,7 +3,7 @@
   <h2>Run a BPE experiment</h2>
   <form action="{{ url_for('run') }}" method="post" enctype="multipart/form-data">
     <label for="text">Paste text</label>
-    <textarea id="text" name="text" placeholder="Paste any text to analyse…"></textarea>
+    <textarea id="text" name="text" placeholder="Paste any text to analyse…">{{ prefill_text or '' }}</textarea>
 
     <div class="row">
       <div>
@@ -21,29 +21,51 @@
 
     <div class="row">
       <div>
+        <label>Category</label>
+        <label><input type="radio" name="category" value="english" required
+          {% if prefill_category == 'english' %}checked{% endif %}> English language</label>
+        <label><input type="radio" name="category" value="code" required
+          {% if prefill_category == 'code' %}checked{% endif %}> Source code</label>
+      </div>
+    </div>
+    <p class="muted">You choose the category — it's not detected automatically. It
+      decides which cleaning rules the Clean button applies (indentation is
+      preserved for code, collapsed for English prose).</p>
+
+    <div class="row">
+      <div>
         <label for="k_max">k — number of BPE merges</label>
-        <input type="number" id="k_max" name="k_max" value="200" min="0" max="2000">
+        <input type="number" id="k_max" name="k_max" value="{{ prefill_k_max or 200 }}" min="0" max="2000">
       </div>
       <div>
         <label for="k_step">Sweep step <span class="muted">(0 = single run at k)</span></label>
-        <input type="number" id="k_step" name="k_step" value="25" min="0" max="2000">
+        <input type="number" id="k_step" name="k_step" value="{{ prefill_k_step or 25 }}" min="0" max="2000">
       </div>
     </div>
     <p class="muted">With a step, the analyser runs k = 0, step, 2·step, … up to k, so the
       results page can show compression utility and vocabulary size across
-      the whole sweep. Repeated (input, k) pairs reuse the stored row — no
-      duplicates.</p>
-    <button type="submit">Run analysis</button>
+      the whole sweep. Repeated (input, k, category) combinations reuse the
+      stored row — no duplicates.</p>
+
+    <input type="hidden" name="was_cleaned" value="{{ '1' if prefill_cleaned else '0' }}">
+    <div class="row">
+      <button type="submit" formaction="{{ url_for('clean') }}">Clean</button>
+      <button type="submit">Run analysis</button>
+    </div>
+    <p class="muted"><strong>Clean</strong> applies the category's cleaning rules and
+      puts the result back in the text box for you to check — it doesn't run BPE.
+      <strong>Run analysis</strong> runs BPE on whatever's in the box, cleaned or not.</p>
   </form>
 
   <h2>Stored inputs</h2>
   {% if inputs %}
   <table>
-    <tr><th>Label</th><th class="num">Chars</th><th class="num">Runs</th>
+    <tr><th>Label</th><th>Category</th><th class="num">Chars</th><th class="num">Runs</th>
         <th class="num">Max k</th><th>Last run (UTC)</th><th></th></tr>
     {% for i in inputs %}
     <tr>
       <td><a href="{{ url_for('results', ihash=i['input_hash']) }}">{{ i['label'] }}</a></td>
+      <td>{{ i['category'] }}</td>
       <td class="num">{{ i['original_chars'] }}</td>
       <td class="num">{{ i['runs'] }}</td>
       <td class="num">{{ i['max_k'] }}</td>

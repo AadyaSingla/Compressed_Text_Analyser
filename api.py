@@ -12,6 +12,8 @@ from config import MAX_INPUT_CHARS, MAX_K, SAMPLES
 
 api_bp = Blueprint("api", __name__, url_prefix="/api")
 
+VALID_CATEGORIES = {"code", "english"}
+
 
 def _parse_ks(payload):
     k_max = int(payload.get("k_max", payload.get("k", 100)))
@@ -38,6 +40,8 @@ def list_inputs():
             type: object
             properties:
               input_hash: {type: string}
+              category: {type: string}
+              cleaned: {type: integer}
               label: {type: string}
               original_chars: {type: integer}
               runs: {type: integer}
@@ -104,6 +108,28 @@ def run_experiments():
               type: string
               enum: [english, code]
               description: Use a bundled sample instead of `text`.
+            category:
+              type: string
+              enum: [code, english]
+              description: >
+                Required unless `sample` is set, in which case it defaults
+                to the sample's own category (sample keys and category
+                values are identical strings). Selects which cleaning
+                rules run before BPE: indentation is preserved for `code`,
+                collapsed for `english`. The same text may be analysed
+                under both categories; each is stored as a separate track.
+            clean:
+              type: boolean
+              default: false
+              description: >
+                Convenience flag: if true, the server applies
+                category-appropriate cleaning to `text` once before
+                running BPE (equivalent to calling the cleaning rules
+                yourself and passing the result as `text`). Defaults to
+                false — BPE runs on `text` exactly as given. Since
+                cleaning changes the text, a cleaned and an uncleaned run
+                naturally get different `input_hash`es rather than
+                colliding.
             label:
               type: string
               description: Optional label; defaults to the first 30 chars of the text.
@@ -128,24 +154,34 @@ def run_experiments():
               items:
                 type: object
       400:
-        description: Missing/invalid text or k parameters.
+        description: Missing/invalid text, category, or k parameters.
     """
     payload = request.get_json(silent=True) or {}
 
     sample = payload.get("sample", "")
     text = payload.get("text", "")
     label = payload.get("label")
+    category = payload.get("category")
+    clean = payload.get("clean", False)
 
     if sample in SAMPLES:
         text = SAMPLES[sample].read_text(encoding="utf-8")
         label = label or sample
+        category = category or sample
     if not text:
         return jsonify({"error": "provide `text` or a valid `sample`"}), 400
+    if category not in VALID_CATEGORIES:
+        return jsonify({"error": "`category` must be one of: code, english"}), 400
+    if not isinstance(clean, bool):
+        return jsonify({"error": "`clean` must be a boolean"}), 400
     if len(text) > MAX_INPUT_CHARS:
         return jsonify(
             {"error": f"input too large ({len(text)} chars, limit {MAX_INPUT_CHARS})"}
         ), 400
     label = label or text[:30].replace("\n", " ")
+
+    if clean:
+        text = bpe.normalize(text, category)
 
     try:
         ks = _parse_ks(payload)
@@ -155,10 +191,10 @@ def run_experiments():
     conn = db.connect()
     new_rows = 0
     for k in ks:
-        if db.get_experiment(conn, text, k):
+        if db.get_experiment(conn, text, k, category):
             continue
         stats = bpe.analyse(text, k)
-        _, created = db.save_experiment(conn, label, text, stats)
+        _, created = db.save_experiment(conn, label, category, clean, text, stats)
         new_rows += created
     ihash = db.input_hash(text)
     rows = db.rows_for_input(conn, ihash)

@@ -3,15 +3,19 @@
 {% block content %}
   <h2>Results — {{ label }}</h2>
 
+  <img class="plot" src="{{ url_for('plot', ihash=ihash) }}"
+       alt="Compression utility and vocabulary size vs k">
+
   <table>
     <tr>
-      <th class="num">k</th><th class="num">Merges applied</th><th class="num">Chars</th>
+      <th class="num">k</th><th>Category</th><th class="num">Merges applied</th><th class="num">Chars</th>
       <th class="num">Tokens</th><th class="num">Vocab</th>
       <th class="num">Utility</th><th>Longest token</th>
     </tr>
     {% for r in rows %}
     <tr>
       <td class="num">{{ r['k'] }}</td>
+      <td>{{ r['category'] }}</td>
       <td class="num">{{ r['merges_applied'] }}</td>
       <td class="num">{{ r['original_chars'] }}</td>
       <td class="num">{{ r['token_count'] }}</td>
@@ -23,5 +27,5 @@
   </table>
 
   <h2>Input preview</h2>
-  <pre class="preview">{{ preview }}{% if rows[0]['original_chars'] > 400 %}…{% endif %}</pre>
+  <pre class="preview">{{ preview }}{% if truncated %}…{% endif %}</pre>
 {% endblock %}
