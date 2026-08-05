@@ -7,6 +7,121 @@ project evolves.)
 
 ---
 
+## 2026-08-05 — Elbow detection, a per-file summary table, and a cross-file analysis page
+
+- **Why**: everything the app did up to here answered a *within-one-input*
+  question — "how does this text compress as k grows" — and answered it as
+  a curve the reader had to eyeball. Two things were missing. First, the
+  interesting point on that curve (where extra merges stop paying for
+  themselves) was never computed, only visible. Second, there was no way to
+  put inputs next to each other: comparing prose against code, or short
+  against long, meant opening two results pages and squinting. This change
+  adds a single scalar per input — the **elbow k** — and a page that plots
+  it across every input analysed so far, which is what turns a pile of
+  individual runs into an actual cross-file finding.
+
+- **`bpe.analyse_series(text)`** — runs BPE *once* from single characters
+  and records a stats row after every merge, up to the same natural stop
+  as `train_bpe` (no pair occurs at least twice). This exists because the
+  obvious way to get the utility curve — calling `analyse(text, k)` for
+  every k — retrains from scratch each time, i.e. O(k²) work for a curve
+  the single pass already walks through. It also gives the curve at *every*
+  k rather than only at the sweep's step points, which matters: the elbow
+  is a specific k, and a sweep with step 50 could only ever locate it to
+  the nearest 50. Returns k = 0 (the untouched character list) as the first
+  row, so the series always has a utility-0 baseline like the sweep does.
+
+- **`bpe.find_elbow_k(utilities)`** — the knee / distance-to-chord method
+  (Satopaa et al., 2011, *Finding a "Kneedle" in a Haystack*): normalize
+  both axes to [0, 1] and take the k whose point sits farthest **above**
+  the straight chord from (0, 0) to (1, 1). Chosen over curvature/second-
+  derivative approaches because the utility curve is a discrete, integer-
+  valued sequence — numerical second derivatives on it are noisy and need
+  smoothing parameters, whereas the chord distance is one subtraction per
+  point and has no tuning knobs at all. It takes a plain list of numbers
+  rather than the series dicts, deliberately: that keeps it a pure function
+  of a curve with no dependency on the rest of the app, which is what makes
+  it directly unit-testable on hand-written curves (see the tests below).
+  Degenerate inputs return 0 — a one-point curve, or an all-zero one, has
+  no meaningful knee.
+
+- **`bpe.summarize(text, category, label)`** — glues the two together into
+  the flat dict `db.save_summary()` stores: size stats (chars, words,
+  base alphabet, unique words, type/token ratio), the elbow point (k,
+  utility, tokens, vocab, longest token there), the saturation k, and
+  **`pct_captured_at_elbow`** — the elbow's utility as a fraction of the
+  maximum achievable utility. That last one is the number worth reading:
+  it says "you get X% of all the compression this text will ever give you,
+  for `elbow_k` merges instead of `saturation_k`." Same convention as
+  `analyse()`: the caller normalizes the text first, `summarize()` has no
+  opinion on cleaning.
+
+- **New `file_summary` table, not extra columns on `experiments`.** A
+  summary is a property of an *input*, not of an (input, k) run — putting
+  it on `experiments` would repeat the same values once per sweep point and
+  leave "which row's copy is authoritative" ambiguous. `UNIQUE (input_hash,
+  category)` plus `INSERT OR REPLACE` in `save_summary()` means re-running
+  a file refreshes its summary in place rather than accumulating stale
+  copies; the summary is a derived cache of the current text, so replacing
+  it is always correct.
+
+- **`/analysis`** renders one row per stored summary, plus two scatter
+  plots served by `/analysis/elbow.png` (elbow k vs input size) and
+  `/analysis/captured.png` (% of max utility captured at the elbow vs input
+  size). Both come from one helper, `_analysis_scatter(y_field, y_label,
+  title)`, since they differ only in which column goes on the y-axis. Points
+  are coloured by category using **the same two colours as the per-input
+  plot** (`code` = blue `#4058B0`, `english` = red `#B05840`), so a reader
+  moving between the two pages doesn't have to relearn the mapping, and the
+  legend is drawn only when more than one category is present — same rule
+  `plot()` already used. Input size is the x-axis on both because it's the
+  confound worth ruling out first: if elbow k just tracks length, that's not
+  a finding about prose vs code.
+
+- **First tests in the project (`test_bpe.py`)** — plain asserts and a
+  `__main__` block, run with `.venv/bin/python test_bpe.py`, no pytest
+  dependency added. They cover exactly the parts where a silent wrong
+  answer would be invisible in the UI: `find_elbow_k` on a hand-built
+  concave curve whose bend is known by construction (asserted as a range,
+  `2 <= k <= 4`, not an exact k — pinning the precise index would make the
+  test a change-detector for a method that only claims to find the bend
+  *region*), its degenerate cases, and an internal-consistency check on
+  `summarize()` for a short real string (`vocab_at_elbow` = alphabet +
+  elbow k, `0 <= elbow_k <= saturation_k`, the percentage in [0, 1]). The
+  BPE core itself stays untested here — it's already pinned by the worked
+  example in the README.
+
+- **`delete_input()` now clears both tables.** It deleted only from
+  `experiments` at first, which left an orphaned `file_summary` row listing
+  a deleted input on `/analysis` forever — the summary is derived data, so
+  outliving its source is never right. One more `DELETE` in the same
+  function and the same transaction.
+
+- **Redundancy on re-runs, pinned by tests rather than assumed
+  (`test_db.py`)**: the analysis page is only worth reading if re-running a
+  file adds nothing to it — a second summary row for the same input would
+  double-plot a point and quietly bias every cross-file comparison. The
+  guarantee is structural (`UNIQUE (input_hash, category)` +
+  `INSERT OR REPLACE`, mirroring `save_experiment`'s check-then-insert),
+  but structural guarantees are exactly the kind that get broken later by
+  an innocent-looking schema edit, so there are now tests: three runs of
+  one file leave one summary row and one experiment row per k; the
+  surviving summary is the *newest* one (compared field-by-field against a
+  fresh `summarize()`, so a stale row can't pass); one text under both
+  categories deliberately stays two rows; and delete empties both tables.
+  Each test points `db.DB_PATH` at a temp file first — the suite must never
+  be able to touch a real `experiments.db`.
+
+- **Migration**: `file_summary` is a brand-new table, so
+  `CREATE TABLE IF NOT EXISTS` creates it on the next `connect()` with no
+  need to delete `experiments.db` this time — the first schema change in
+  this project that doesn't require it. The one consequence: inputs
+  analysed *before* this change have no summary row, so they stay off
+  `/analysis` until they're run once more. Deliberately not backfilled
+  automatically — re-running an input is one click and writes exactly the
+  same row, which is a better trade than start-up code that rewrites
+  historical data every time the app connects.
+
 ## 2026-08-04 — Decoupled Clean from Analyse; graphs restored
 
 - **Why, for the button redesign**: the previous "Run analysis (raw)" /

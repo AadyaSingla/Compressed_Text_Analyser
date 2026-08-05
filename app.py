@@ -140,6 +140,8 @@ def run():
         stats = bpe.analyse(text, k)
         _, created = db.save_experiment(conn, label, category, cleaned, text, stats)
         new_rows += created
+    summary = bpe.summarize(text, category, label)
+    db.save_summary(conn, db.input_hash(text), summary)
     conn.close()
     flash(f"Ran k = {ks[0]}..{ks[-1]}: {new_rows} new experiment(s), "
           f"{len(ks) - new_rows} already stored.")
@@ -206,6 +208,63 @@ def plot(ihash):
     plt.close(fig)
     buf.seek(0)
     return send_file(buf, mimetype="image/png")
+
+
+@app.route("/analysis")
+def analysis():
+    """Cross-file summary: one row per analysed input, with elbow-point
+    stats, plus links to the two comparison plots."""
+    conn = db.connect()
+    summaries = db.get_all_summaries(conn)
+    conn.close()
+    return render_template("analysis.html", summaries=summaries)
+
+
+def _analysis_scatter(y_field, y_label, title):
+    """Category-coloured scatter PNG of `y_field` vs size_chars, shared by
+    the /analysis/elbow.png and /analysis/captured.png routes."""
+    conn = db.connect()
+    summaries = db.get_all_summaries(conn)
+    conn.close()
+
+    by_category = defaultdict(list)
+    for s in summaries:
+        by_category[s["category"]].append(s)
+    colors = {"code": "#4058B0", "english": "#B05840"}
+
+    fig, ax = plt.subplots(figsize=(6, 4.5))
+    for category, srows in by_category.items():
+        xs = [s["size_chars"] for s in srows]
+        ys = [s[y_field] for s in srows]
+        ax.scatter(xs, ys, label=category, color=colors.get(category))
+
+    ax.set_xlabel("Input size (characters)")
+    ax.set_ylabel(y_label)
+    ax.set_title(title)
+    ax.grid(True, alpha=0.3)
+    if len(by_category) > 1:
+        ax.legend()
+    fig.tight_layout()
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=120)
+    plt.close(fig)
+    buf.seek(0)
+    return send_file(buf, mimetype="image/png")
+
+
+@app.route("/analysis/elbow.png")
+def analysis_elbow_plot():
+    return _analysis_scatter("elbow_k", "Elbow k (BPE merges)", "Elbow k vs input size")
+
+
+@app.route("/analysis/captured.png")
+def analysis_captured_plot():
+    return _analysis_scatter(
+        "pct_captured_at_elbow",
+        "% of max utility captured at elbow",
+        "Utility captured at elbow vs input size",
+    )
 
 
 @app.route("/delete/<ihash>", methods=["POST"])

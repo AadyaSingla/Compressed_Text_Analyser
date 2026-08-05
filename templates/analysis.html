@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Cross-file analysis · Compressed Text Analyser{% endblock %}
+{% block content %}
+  <h2>Cross-file analysis</h2>
+  <p class="muted">One row per analysed input, summarizing where its BPE utility
+    curve elbows — the point of diminishing returns for adding more merges.</p>
+
+  {% if summaries %}
+  <table>
+    <tr>
+      <th>Category</th><th class="num">Chars</th><th class="num">Words</th>
+      <th class="num">Elbow k</th><th class="num">Vocab @ elbow</th>
+      <th class="num">% utility captured</th><th>Longest token @ elbow</th>
+    </tr>
+    {% for s in summaries %}
+    <tr>
+      <td>{{ s['category'] }}</td>
+      <td class="num">{{ s['size_chars'] }}</td>
+      <td class="num">{{ s['size_words'] }}</td>
+      <td class="num">{{ s['elbow_k'] }}</td>
+      <td class="num">{{ s['vocab_at_elbow'] }}</td>
+      <td class="num">{{ "%.1f"|format(s['pct_captured_at_elbow'] * 100) }}%</td>
+      <td><code>{{ s['longest_token_at_elbow'] }}</code></td>
+    </tr>
+    {% endfor %}
+  </table>
+
+  <h2>Elbow k vs input size</h2>
+  <img class="plot" src="{{ url_for('analysis_elbow_plot') }}"
+       alt="Elbow k vs input size, by category">
+
+  <h2>Utility captured at elbow vs input size</h2>
+  <img class="plot" src="{{ url_for('analysis_captured_plot') }}"
+       alt="Percent of max utility captured at elbow vs input size, by category">
+  {% else %}
+    <p class="muted">No summaries yet — run an analysis from the home page first.</p>
+  {% endif %}
+{% endblock %}

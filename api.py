@@ -196,6 +196,8 @@ def run_experiments():
         stats = bpe.analyse(text, k)
         _, created = db.save_experiment(conn, label, category, clean, text, stats)
         new_rows += created
+    summary = bpe.summarize(text, category, label)
+    db.save_summary(conn, db.input_hash(text), summary)
     ihash = db.input_hash(text)
     rows = db.rows_for_input(conn, ihash)
     conn.close()

@@ -30,6 +30,27 @@ CREATE TABLE IF NOT EXISTS experiments (
     UNIQUE (input_string, k, category)
 );
 CREATE INDEX IF NOT EXISTS idx_experiments_hash ON experiments (input_hash, k);
+CREATE TABLE IF NOT EXISTS file_summary (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    input_hash TEXT NOT NULL,
+    label TEXT NOT NULL,
+    category TEXT NOT NULL CHECK (category IN ('code', 'english')),
+    size_chars INTEGER NOT NULL,
+    size_words INTEGER NOT NULL,
+    base_alphabet INTEGER NOT NULL,
+    unique_words INTEGER NOT NULL,
+    type_token_ratio REAL NOT NULL,
+    elbow_k INTEGER NOT NULL,
+    utility_at_elbow INTEGER NOT NULL,
+    tokens_at_elbow INTEGER NOT NULL,
+    vocab_at_elbow INTEGER NOT NULL,
+    max_utility INTEGER NOT NULL,
+    pct_captured_at_elbow REAL NOT NULL,
+    longest_token_at_elbow TEXT NOT NULL,
+    saturation_k INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (input_hash, category)
+);
 """
 
 
@@ -104,5 +125,48 @@ def rows_for_input(conn, ihash):
 
 
 def delete_input(conn, ihash):
+    """Delete everything stored for one input: its experiment rows and its
+    file_summary row(s), so a deleted input also leaves the /analysis page."""
     conn.execute("DELETE FROM experiments WHERE input_hash = ?", (ihash,))
+    conn.execute("DELETE FROM file_summary WHERE input_hash = ?", (ihash,))
     conn.commit()
+
+
+def save_summary(conn, ihash, summary):
+    """Insert or replace the file_summary row for (ihash, category), so
+    re-running a file's analysis refreshes its cross-file summary."""
+    conn.execute(
+        """INSERT OR REPLACE INTO file_summary
+           (input_hash, label, category, size_chars, size_words, base_alphabet,
+            unique_words, type_token_ratio, elbow_k, utility_at_elbow,
+            tokens_at_elbow, vocab_at_elbow, max_utility, pct_captured_at_elbow,
+            longest_token_at_elbow, saturation_k)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            ihash,
+            summary["label"],
+            summary["category"],
+            summary["size_chars"],
+            summary["size_words"],
+            summary["base_alphabet"],
+            summary["unique_words"],
+            summary["type_token_ratio"],
+            summary["elbow_k"],
+            summary["utility_at_elbow"],
+            summary["tokens_at_elbow"],
+            summary["vocab_at_elbow"],
+            summary["max_utility"],
+            summary["pct_captured_at_elbow"],
+            summary["longest_token_at_elbow"],
+            summary["saturation_k"],
+        ),
+    )
+    conn.commit()
+
+
+def get_all_summaries(conn):
+    """All file_summary rows, ordered by category then size_chars, for the
+    cross-file analysis page."""
+    return conn.execute(
+        "SELECT * FROM file_summary ORDER BY category, size_chars"
+    ).fetchall()

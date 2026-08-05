@@ -34,7 +34,8 @@
   </style>
 </head>
 <body>
-  <h1><a href="{{ url_for('index') }}">Compressed Text Analyser</a> <span class="muted">· BPE experiments</span></h1>
+  <h1><a href="{{ url_for('index') }}">Compressed Text Analyser</a> <span class="muted">· BPE experiments</span>
+    · <a href="{{ url_for('analysis') }}">Cross-file analysis</a></h1>
   {% with messages = get_flashed_messages() %}
     {% for m in messages %}<div class="flash">{{ m }}</div>{% endfor %}
   {% endwith %}
