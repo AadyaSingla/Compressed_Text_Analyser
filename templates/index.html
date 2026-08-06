@@ -2,12 +2,9 @@
 {% block content %}
   <h2>Run a BPE experiment</h2>
   <form action="{{ url_for('run') }}" method="post" enctype="multipart/form-data">
-    <label for="text">Paste text</label>
-    <textarea id="text" name="text" placeholder="Paste any text to analyse…">{{ prefill_text or '' }}</textarea>
-
     <div class="row">
       <div>
-        <label for="file">…or upload a file</label>
+        <label for="file">Upload a file</label>
         <input type="file" id="file" name="file">
       </div>
       <div>
@@ -18,6 +15,14 @@
         </select>
       </div>
     </div>
+
+    {% if prefill_text %}
+    <label>Cleaned text <span class="muted">({{ prefill_label }} — this is what Run BPE will analyse)</span></label>
+    <pre class="preview">{{ prefill_text[:2000] }}{% if prefill_text|length > 2000 %}…{% endif %}</pre>
+    <input type="hidden" name="cleaned_text" value="{{ prefill_text }}">
+    <input type="hidden" name="cleaned_label" value="{{ prefill_label }}">
+    <p class="muted">Choosing a file or sample above replaces this cleaned text.</p>
+    {% endif %}
 
     <div class="row">
       <div>
@@ -47,14 +52,15 @@
       the whole sweep. Repeated (input, k, category) combinations reuse the
       stored row — no duplicates.</p>
 
-    <input type="hidden" name="was_cleaned" value="{{ '1' if prefill_cleaned else '0' }}">
     <div class="row">
       <button type="submit" formaction="{{ url_for('clean') }}">Clean</button>
-      <button type="submit">Run analysis</button>
+      <button type="submit">Run BPE</button>
+      <a class="button" href="{{ url_for('analysis') }}">Analysis</a>
     </div>
     <p class="muted"><strong>Clean</strong> applies the category's cleaning rules and
-      puts the result back in the text box for you to check — it doesn't run BPE.
-      <strong>Run analysis</strong> runs BPE on whatever's in the box, cleaned or not.</p>
+      shows you the result — it doesn't run BPE. <strong>Run BPE</strong> analyses the
+      cleaned text if you've just cleaned, and the file or sample you picked otherwise.
+      <strong>Analysis</strong> opens the cross-file page comparing every input so far.</p>
   </form>
 
   <h2>Stored inputs</h2>

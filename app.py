@@ -39,25 +39,41 @@ VALID_CATEGORIES = {"code", "english"}
 
 
 def _resolve_input():
-    """Get (label, text, category) from the form: pasted text, upload, or
-    sample. Category is a separate required field, never inferred, so the
-    same text can deliberately be run under either category."""
+    """Get (label, text, category, cleaned) from the form.
+
+    Text comes from a bundled sample or an uploaded file — those are the
+    only two ways in. The third case isn't a user-typed input at all: it's
+    the cleaned text handed back by a previous Clean click, carried in a
+    hidden field so Run BPE can analyse it. Sample and upload win over it,
+    so choosing a new source after cleaning analyses the new source rather
+    than stale cleaned text.
+
+    `cleaned` is derived from which source won, not from a form flag, so a
+    row can never be labelled cleaned when it isn't. Category is a separate
+    required field, never inferred, so the same text can deliberately be
+    run under either category.
+    """
     sample = request.form.get("sample", "")
     upload = request.files.get("file")
-    pasted = request.form.get("text", "").strip()
+    carried = request.form.get("cleaned_text", "")
     category = request.form.get("category", "")
 
     if sample in SAMPLES:
-        return sample, SAMPLES[sample].read_text(encoding="utf-8"), category
+        return sample, SAMPLES[sample].read_text(encoding="utf-8"), category, False
     if upload and upload.filename:
         text = upload.read().decode("utf-8", errors="replace")
         UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
         (UPLOAD_DIR / upload.filename).write_text(text, encoding="utf-8")
-        return upload.filename, text, category
-    if pasted:
-        label = pasted[:30].replace("\n", " ")
-        return label, pasted, category
-    return None, None, category
+        return upload.filename, text, category, False
+    if carried.strip():
+        # Round-tripping through a hidden field can turn newlines into CRLF
+        # on the way back. Both cleaning rules guarantee \n only, so undoing
+        # that is a no-op on untouched text and a repair otherwise — without
+        # it, the text analysed would differ from the text just displayed.
+        carried = carried.replace("\r\n", "\n").replace("\r", "\n")
+        label = request.form.get("cleaned_label", "") or carried[:30].replace("\n", " ")
+        return label, carried, category, True
+    return None, None, category, False
 
 
 def _parse_ks():
@@ -85,13 +101,14 @@ def index():
 
 @app.route("/clean", methods=["POST"])
 def clean():
-    """Clean the submitted text and hand it back in the textarea for
-    review, without running BPE. A separate step from Analyse — cleaning
-    is something the user opts into explicitly, not a flag bundled into
-    the analysis run."""
-    label, text, category = _resolve_input()
+    """Clean the selected file's text and hand it back for review, without
+    running BPE. A separate step from Run BPE — cleaning is something the
+    user opts into explicitly, not a flag bundled into the analysis run.
+    The result is shown read-only and carried in a hidden field, so the
+    next Run BPE click analyses exactly the text on screen."""
+    label, text, category, _ = _resolve_input()
     if not text:
-        flash("Provide some text: paste it, upload a file, or pick a sample.")
+        flash("Choose an input: upload a file or pick a sample.")
         return redirect(url_for("index"))
     if category not in VALID_CATEGORIES:
         flash("Choose a category: source code or English language.")
@@ -101,11 +118,11 @@ def clean():
         return redirect(url_for("index"))
 
     cleaned_text = bpe.normalize(text, category)
-    flash("Text cleaned below — click Run analysis when you're ready.")
+    flash("Text cleaned below — click Run BPE when you're ready.")
     return _render_index(
         prefill_text=cleaned_text,
+        prefill_label=label,
         prefill_category=category,
-        prefill_cleaned=True,
         prefill_k_max=request.form.get("k_max", "200"),
         prefill_k_step=request.form.get("k_step", "25"),
     )
@@ -113,9 +130,9 @@ def clean():
 
 @app.route("/run", methods=["POST"])
 def run():
-    label, text, category = _resolve_input()
+    label, text, category, cleaned = _resolve_input()
     if not text:
-        flash("Provide some text: paste it, upload a file, or pick a sample.")
+        flash("Choose an input: upload a file or pick a sample.")
         return redirect(url_for("index"))
     if category not in VALID_CATEGORIES:
         flash("Choose a category: source code or English language.")
@@ -123,8 +140,6 @@ def run():
     if len(text) > MAX_INPUT_CHARS:
         flash(f"Input too large ({len(text)} chars, limit {MAX_INPUT_CHARS}).")
         return redirect(url_for("index"))
-
-    cleaned = request.form.get("was_cleaned") == "1"
 
     try:
         ks = _parse_ks()
@@ -220,9 +235,11 @@ def analysis():
     return render_template("analysis.html", summaries=summaries)
 
 
-def _analysis_scatter(y_field, y_label, title):
-    """Category-coloured scatter PNG of `y_field` vs size_chars, shared by
-    the /analysis/elbow.png and /analysis/captured.png routes."""
+def _analysis_plot(y_field, y_label, title):
+    """Category-coloured PNG of `y_field` vs size_chars — one marked line per
+    category, so the trend across the size-graded samples is visible and not
+    just the individual points. Shared by the /analysis/elbow.png and
+    /analysis/captured.png routes."""
     conn = db.connect()
     summaries = db.get_all_summaries(conn)
     conn.close()
@@ -234,9 +251,13 @@ def _analysis_scatter(y_field, y_label, title):
 
     fig, ax = plt.subplots(figsize=(6, 4.5))
     for category, srows in by_category.items():
+        # Sort here rather than relying on the query's ORDER BY: a line drawn
+        # through points in any other order zigzags back on itself.
+        srows = sorted(srows, key=lambda r: r["size_chars"])
         xs = [s["size_chars"] for s in srows]
         ys = [s[y_field] for s in srows]
-        ax.scatter(xs, ys, label=category, color=colors.get(category))
+        ax.plot(xs, ys, marker="o", markersize=7, linewidth=2,
+                label=category, color=colors.get(category))
 
     ax.set_xlabel("Input size (characters)")
     ax.set_ylabel(y_label)
@@ -255,12 +276,12 @@ def _analysis_scatter(y_field, y_label, title):
 
 @app.route("/analysis/elbow.png")
 def analysis_elbow_plot():
-    return _analysis_scatter("elbow_k", "Elbow k (BPE merges)", "Elbow k vs input size")
+    return _analysis_plot("elbow_k", "Elbow k (BPE merges)", "Elbow k vs input size")
 
 
 @app.route("/analysis/captured.png")
 def analysis_captured_plot():
-    return _analysis_scatter(
+    return _analysis_plot(
         "pct_captured_at_elbow",
         "% of max utility captured at elbow",
         "Utility captured at elbow vs input size",

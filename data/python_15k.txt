@@ -1,0 +1,405 @@
+elf.connected:
+            self.conn.close()
+        # Technically we don't need to wait, but otherwise we will get ResourceWarnings.
+        try:
+            self.proc.wait(timeout=WORKER_SHUTDOWN_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            pass
+        if os.path.isfile(self.status_file):
+            os.unlink(self.status_file)
+
+
+def build_error(msg: str) -> NoReturn:
+    raise CompileError([f"mypy: error: {msg}"])
+
+
+def build(
+    sources: list[BuildSource],
+    options: Options,
+    alt_lib_path: str | None = None,
+    flush_errors: Callable[[str | None, list[str], bool], None] | None = None,
+    fscache: FileSystemCache | None = None,
+    stdout: TextIO | None = None,
+    stderr: TextIO | None = None,
+    extra_plugins: Sequence[Plugin] | None = None,
+    worker_env: Mapping[str, str] | None = None,
+) -> BuildResult:
+    """Analyze a program.
+
+    A single call to build performs parsing, semantic analysis and optionally
+    type checking for the program *and* all imported modules, recursively.
+
+    Return BuildResult if successful or only non-blocking errors were found;
+    otherwise raise CompileError.
+
+    If a flush_errors callback is provided, all error messages will be
+    passed to it and the errors and messages fields of BuildResult and
+    CompileError (respectively) will be empty. Otherwise, those fields will
+    report any error messages.
+
+    Args:
+      sources: list of sources to build
+      options: build options
+      alt_lib_path: an additional directory for looking up library modules
+        (takes precedence over other directories)
+      flush_errors: optional function to flush errors after a file is processed
+      fscache: optionally a file-system cacher
+      stdout: Output stream to use instead of `sys.stdout`
+      stderr: Error stream to use instead of `sys.stderr`
+      extra_plugins: Plugins to use in addition to those loaded from config
+      worker_env: An environment to start parallel build workers (used for tests)
+    """
+    # If we were not given a flush_errors, we use one that will populate those
+    # fields for callers that want the traditional API.
+    messages = []
+
+    # This is mostly for the benefit of tests that use builtins fixtures.
+    instance_cache.reset()
+    reset_known_modules_cache()
+
+    def default_flush_errors(
+        filename: str | None, new_messages: list[str], is_serious: bool
+    ) -> None:
+        messages.extend(new_messages)
+
+    flush_errors = flush_errors or default_flush_errors
+    stdout = stdout or sys.stdout
+    stderr = stderr or sys.stderr
+    extra_plugins = extra_plugins or []
+
+    # Create metastore before workers to avoid race conditions.
+    metastore = create_metastore(options, parallel_worker=False)
+    workers = []
+    connect_threads = []
+    # A quasi-unique ID for this specific mypy invocation.
+    build_id = os.urandom(4).hex()
+    options_data = None
+    if options.num_workers > 0:
+        os.makedirs(options.cache_dir, exist_ok=True)
+        options_data = os_path_join(options.cache_dir, f".worker_options.{build_id}.data")
+        with open(options_data, "wb") as f:
+            f.write(options.to_bytes())
+        workers = [
+            WorkerClient(
+                f".mypy_worker.{build_id}.{idx}.json", options_data, worker_env or os.environ
+            )
+            for idx in range(options.num_workers)
+        ]
+        sources_message = SourcesDataMessage(sources=sources)
+        buf = WriteBuffer()
+        sources_message.write(buf)
+        sources_data = buf.getvalue()
+
+        def connect(wc: WorkerClient, data: bytes) -> None:
+            # Start loading sources in each worker as soon as it is up.
+            wc.connect()
+            if not wc.connected:
+                # Caller should detect this and fail gracefully.
+                return
+            wc.conn.write_bytes(data)
+
+        # We don't wait for workers to be ready until they are actually needed.
+        for worker in workers:
+            thread = Thread(target=connect, args=(worker, sources_data))
+            thread.start()
+            connect_threads.append(thread)
+
+    try:
+        result = build_inner(
+            sources,
+            options,
+            alt_lib_path,
+            flush_errors,
+            fscache,
+            stdout,
+            stderr,
+            extra_plugins,
+            workers,
+            connect_threads,
+            metastore,
+        )
+        result.errors = messages
+        return result
+    except CompileError as e:
+        # CompileErrors raised from an errors object carry all the
+        # messages that have not been reported out by error streaming.
+        # Patch it up to contain either none or all none of the messages,
+        # depending on whether we are flushing errors.
+        serious = not e.use_stdout
+        flush_errors(None, e.messages, serious)
+        e.messages = messages
+        raise
+    finally:
+        # In case of an early crash it is better to wait for workers to become ready, and
+        # shut them down cleanly. Otherwise, they will linger until connection timeout.
+        for thread in connect_threads:
+            thread.join()
+        if options_data is not None:
+            os.unlink(options_data)
+        for worker in workers:
+            if not worker.connected:
+                continue
+            try:
+                send(worker.conn, SccRequestMessage(scc_ids=[], import_errors={}, mod_data={}))
+            except (OSError, IPCException):
+                pass
+        for worker in workers:
+            worker.close()
+
+
+def build_inner(
+    sources: list[BuildSource],
+    options: Options,
+    alt_lib_path: str | None,
+    flush_errors: Callable[[str | None, list[str], bool], None],
+    fscache: FileSystemCache | None,
+    stdout: TextIO,
+    stderr: TextIO,
+    extra_plugins: Sequence[Plugin],
+    workers: list[WorkerClient],
+    connect_threads: list[Thread],
+    metastore: MetadataStore,
+) -> BuildResult:
+    if platform.python_implementation() == "CPython":
+        # Run gc less frequently, as otherwise we can spend a large fraction of
+        # cpu in gc. This seems the most reasonable place to tune garbage collection.
+        gc.set_threshold(200 * 1000, 30, 30)
+
+    data_dir = default_data_dir()
+    fscache = fscache or FileSystemCache()
+
+    search_paths = compute_search_paths(sources, options, data_dir, alt_lib_path)
+
+    reports = None
+    if options.report_dirs:
+        # Import lazily to avoid slowing down startup.
+        from mypy.report import Reports
+
+        reports = Reports(data_dir, options.report_dirs)
+
+    source_set = BuildSourceSet(sources)
+    cached_read = fscache.read
+    error_formatter = None if options.output is None else OUTPUT_CHOICES.get(options.output)
+    errors = Errors(
+        options,
+        read_source=lambda path: read_py_file(path, cached_read),
+        error_formatter=error_formatter,
+    )
+    # Record import errors so that they can be replayed by the workers.
+    if workers:
+        errors.global_watcher = True
+    plugin, snapshot = load_plugins(options, errors, stdout, extra_plugins)
+
+    # Validate error codes after plugins are loaded.
+    options.process_error_codes(error_callback=build_error)
+
+    # Construct a build manager object to hold state during the build.
+    #
+    # Ignore current directory prefix in error messages.
+    manager = BuildManager(
+        data_dir,
+        search_paths,
+        ignore_prefix=os.getcwd(),
+        source_set=source_set,
+        reports=reports,
+        options=options,
+        version_id=__version__,
+        plugin=plugin,
+        plugins_snapshot=snapshot,
+        errors=errors,
+        error_formatter=error_formatter,
+        flush_errors=flush_errors,
+        fscache=fscache,
+        stdout=stdout,
+        stderr=stderr,
+        metastore=metastore,
+    )
+    manager.workers = workers
+    if manager.verbosity() >= 2:
+        manager.trace(repr(options))
+
+    reset_global_state()
+    try:
+        graph = dispatch(sources, manager, stdout, connect_threads)
+        if not options.fine_grained_incremental:
+            type_state.reset_all_subtype_caches()
+        if options.timing_stats is not None:
+            dump_timing_stats(options.timing_stats, graph)
+        if options.line_checking_stats is not None:
+            dump_line_checking_stats(options.line_checking_stats, graph)
+        warn_unused_configs(options, flush_errors)
+        return BuildResult(manager, graph)
+    finally:
+        manager.commit()
+        manager.log(
+            "Build finished in %.3f seconds with %d modules, and %d errors"
+            % (
+                time.time() - manager.start_time,
+                len(manager.modules),
+                manager.errors.num_messages(),
+            )
+        )
+        manager.dump_stats()
+        if reports is not None:
+            # Finish the HTML or XML reports even if CompileError was raised.
+            reports.finish()
+        if os.path.isdir(options.cache_dir):
+            add_catch_all_gitignore(options.cache_dir)
+            exclude_from_backups(options.cache_dir)
+        if os.path.isdir(options.cache_dir):
+            record_missing_stub_packages(options.cache_dir, manager.missing_stub_packages)
+
+
+def warn_unused_configs(
+    options: Options, flush_errors: Callable[[str | None, list[str], bool], None]
+) -> None:
+    unused_configs = options.get_unused_configs()
+    if options.warn_unused_configs and unused_configs and not options.non_interactive:
+        unused = get_config_module_names(
+            options.config_file,
+            [glob for glob in options.per_module_options.keys() if glob in unused_configs],
+        )
+        flush_errors(
+            None, ["{}: note: unused section(s): {}".format(options.config_file, unused)], False
+        )
+
+
+def default_data_dir() -> str:
+    """Returns directory containing typeshed directory."""
+    return os.path.dirname(__file__)
+
+
+def normpath(path: str, options: Options) -> str:
+    """Convert path to absolute; but to relative in bazel mode.
+
+    (Bazel's distributed cache doesn't like filesystem metadata to
+    end up in output files.)
+    """
+    # TODO: Could we always use relpath?  (A worry in non-bazel
+    # mode would be that a moved file may change its full module
+    # name without changing its size, mtime or hash.)
+    if options.bazel:
+        return os.path.relpath(path)
+    else:
+        return os.path.abspath(path)
+
+
+# NOTE: dependencies + suppressed == all reachable imports;
+# suppressed contains those reachable imports that were prevented by
+# silent mode or simply not found.
+
+
+# Metadata for the fine-grained dependencies file associated with a module.
+class FgDepMeta(TypedDict):
+    path: str
+    mtime: int
+
+
+# Priorities used for imports.  (Here, top-level includes inside a class.)
+# These are used to determine a more predictable order in which the
+# nodes in an import cycle are processed.
+PRI_HIGH: Final = 5  # top-level "from X import blah"
+PRI_MED: Final = 10  # top-level "import X"
+PRI_LOW: Final = 20  # either form inside a function
+PRI_MYPY: Final = 25  # inside "if MYPY" or "if TYPE_CHECKING"
+PRI_INDIRECT: Final = 30  # an indirect dependency
+PRI_ALL: Final = 99  # include all priorities
+
+
+def import_priority(imp: ImportBase, toplevel_priority: int) -> int:
+    """Compute import priority from an import node."""
+    if not imp.is_top_level:
+        # Inside a function
+        return PRI_LOW
+    if imp.is_mypy_only:
+        # Inside "if MYPY" or "if typing.TYPE_CHECKING"
+        return max(PRI_MYPY, toplevel_priority)
+    # A regular import; priority determined by argument.
+    return toplevel_priority
+
+
+def load_plugins_from_config(
+    options: Options, errors: Errors, stdout: TextIO
+) -> tuple[list[Plugin], dict[str, str]]:
+    """Load all configured plugins.
+
+    Return a list of all the loaded plugins from the config file.
+    The second return value is a snapshot of versions/hashes of loaded user
+    plugins (for cache validation).
+    """
+    import importlib
+
+    snapshot: dict[str, str] = {}
+
+    if not options.config_file:
+        return [], snapshot
+
+    line = find_config_file_line_number(options.config_file, "mypy", "plugins")
+    if line == -1:
+        line = 1  # We need to pick some line number that doesn't look too confusing
+
+    def plugin_error(message: str) -> NoReturn:
+        errors.report(line, 0, message)
+        errors.raise_error(use_stdout=False)
+
+    custom_plugins: list[Plugin] = []
+    errors.set_file(options.config_file, None, options)
+    for plugin_path in options.plugins:
+        func_name = "plugin"
+        plugin_dir: str | None = None
+        if ":" in os.path.basename(plugin_path):
+            plugin_path, func_name = plugin_path.rsplit(":", 1)
+        if plugin_path.endswith(".py"):
+            # Plugin paths can be relative to the config file location.
+            plugin_path = os_path_join(os.path.dirname(options.config_file), plugin_path)
+            if not os.path.isfile(plugin_path):
+                plugin_error(f'Can\'t find plugin "{plugin_path}"')
+            # Use an absolute path to avoid populating the cache entry
+            # for 'tmp' during tests, since it will be different in
+            # different tests.
+            plugin_dir = os.path.abspath(os.path.dirname(plugin_path))
+            fnam = os.path.basename(plugin_path)
+            module_name = fnam[:-3]
+            sys.path.insert(0, plugin_dir)
+        elif re.search(r"[\\/]", plugin_path):
+            fnam = os.path.basename(plugin_path)
+            plugin_error(f'Plugin "{fnam}" does not have a .py extension')
+        else:
+            module_name = plugin_path
+
+        try:
+            module = importlib.import_module(module_name)
+        except Exception as exc:
+            plugin_error(f'Error importing plugin "{plugin_path}": {exc}')
+        finally:
+            if plugin_dir is not None:
+                assert sys.path[0] == plugin_dir
+                del sys.path[0]
+
+        if not hasattr(module, func_name):
+            plugin_error(
+                'Plugin "{}" does not define entry point function "{}"'.format(
+                    plugin_path, func_name
+                )
+            )
+
+        try:
+            plugin_type = getattr(module, func_name)(__version__)
+        except Exception:
+            print(f"Error calling the plugin(version) entry point of {plugin_path}\n", file=stdout)
+            raise  # Propagate to display traceback
+
+        if not isinstance(plugin_type, type):
+            plugin_error(
+                'Type object expected as the return value of "plugin"; got {!r} (in {})'.format(
+                    plugin_type, plugin_path
+                )
+            )
+        if not issubclass(plugin_type, Plugin):
+            plugin_error(
+                'Return value of "plugin" must be a subclass of "mypy.plugin.Plugin" '
+                "(in {})".format(plugin_path)
+            )
+        try:
+            custom_plugins.append(plugin_type(options))
+        

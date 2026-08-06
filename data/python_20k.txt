@@ -1,0 +1,412 @@
+    snapshot[module_name] = take_module_snapshot(module)
+        except Exception:
+            print(f"Error constructing plugin instance of {plugin_type.__name__}\n", file=stdout)
+            raise  # Propagate to display traceback
+
+    return custom_plugins, snapshot
+
+
+def load_plugins(
+    options: Options, errors: Errors, stdout: TextIO, extra_plugins: Sequence[Plugin]
+) -> tuple[Plugin, dict[str, str]]:
+    """Load all configured plugins.
+
+    Return a plugin that encapsulates all plugins chained together. Always
+    at least include the default plugin (it's last in the chain).
+    The second return value is a snapshot of versions/hashes of loaded user
+    plugins (for cache validation).
+    """
+    custom_plugins, snapshot = load_plugins_from_config(options, errors, stdout)
+
+    custom_plugins += extra_plugins
+
+    default_plugin: Plugin = DefaultPlugin(options)
+    if not custom_plugins:
+        return default_plugin, snapshot
+
+    # Custom plugins take precedence over the default plugin.
+    return ChainedPlugin(options, custom_plugins + [default_plugin]), snapshot
+
+
+def take_module_snapshot(module: types.ModuleType) -> str:
+    """Take plugin module snapshot by recording its version and hash.
+
+    We record _both_ hash and the version to detect more possible changes
+    (e.g. if there is a change in modules imported by a plugin).
+    """
+    if hasattr(module, "__file__"):
+        assert module.__file__ is not None
+        with open(module.__file__, "rb") as f:
+            digest = hash_digest(f.read())
+    else:
+        digest = "unknown"
+    ver = getattr(module, "__version__", "none")
+    return f"{ver}:{digest}"
+
+
+def find_config_file_line_number(path: str, section: str, setting_name: str) -> int:
+    """Return the approximate location of setting_name within mypy config file.
+
+    Return -1 if can't determine the line unambiguously.
+    """
+    in_desired_section = False
+    try:
+        results = []
+        with open(path, encoding="UTF-8") as f:
+            for i, line in enumerate(f):
+                line = line.strip()
+                if line.startswith("[") and line.endswith("]"):
+                    current_section = line[1:-1].strip()
+                    in_desired_section = current_section == section
+                elif in_desired_section and re.match(rf"{setting_name}\s*=", line):
+                    results.append(i + 1)
+        if len(results) == 1:
+            return results[0]
+    except OSError:
+        pass
+    return -1
+
+
+class BuildManager:
+    """This class holds shared state for building a mypy program.
+
+    It is used to coordinate parsing, import processing, semantic
+    analysis and type checking.  The actual build steps are carried
+    out by dispatch().
+
+    Attributes:
+      data_dir:        Mypy data directory (contains stubs)
+      search_paths:    SearchPaths instance indicating where to look for modules
+      modules:         Mapping of module ID to MypyFile (shared by the passes)
+      semantic_analyzer:
+                       Semantic analyzer, pass 2
+      all_types:       Map {Expression: Type} from all modules (enabled by export_types)
+      options:         Build options
+      missing_modules: Modules that could not be imported (or intentionally skipped)
+      stale_modules:   Set of modules that needed to be rechecked (only used by tests)
+      fg_deps_meta:    Metadata for fine-grained dependencies caches associated with modules
+      fg_deps:         A fine-grained dependency map
+      version_id:      The current mypy version (based on commit id when possible)
+      plugin:          Active mypy plugin(s)
+      plugins_snapshot:
+                       Snapshot of currently active user plugins (versions and hashes)
+      old_plugins_snapshot:
+                       Plugins snapshot from previous incremental run (or None in
+                       non-incremental mode and if cache was not found)
+      errors:          Used for reporting all errors
+      flush_errors:    A function for processing errors after each SCC
+      cache_enabled:   Whether cache is being read. This is set based on options,
+                       but is disabled if fine-grained cache loading fails
+                       and after an initial fine-grained load. This doesn't
+                       determine whether we write cache files or not.
+      quickstart_state:
+                       A cache of filename -> mtime/size/hash info used to avoid
+                       needing to hash source files when using a cache with mismatching mtimes
+      stats:           Dict with various instrumentation numbers, it is used
+                       not only for debugging, but also required for correctness,
+                       in particular to check consistency of the fine-grained dependency cache.
+      fscache:         A file system cacher
+      ast_cache:       AST cache to speed up mypy daemon
+    """
+
+    def __init__(
+        self,
+        data_dir: str,
+        search_paths: SearchPaths,
+        ignore_prefix: str,
+        source_set: BuildSourceSet,
+        reports: Reports | None,
+        options: Options,
+        version_id: str,
+        plugin: Plugin,
+        plugins_snapshot: dict[str, str],
+        errors: Errors,
+        flush_errors: Callable[[str | None, list[str], bool], None],
+        fscache: FileSystemCache,
+        stdout: TextIO,
+        stderr: TextIO,
+        error_formatter: ErrorFormatter | None = None,
+        parallel_worker: bool = False,
+        metastore: MetadataStore | None = None,
+    ) -> None:
+        self.stats: dict[str, Any] = {}  # Values are ints or floats
+        # Use in cases where we need to prevent race conditions in stats reporting.
+        self.stats_lock = Lock()
+        self.stdout = stdout
+        self.stderr = stderr
+        self.start_time = time.time()
+        self.data_dir = data_dir
+        self.errors = errors
+        self.errors.set_ignore_prefix(ignore_prefix)
+        self.error_formatter = error_formatter
+        self.search_paths = search_paths
+        self.source_set = source_set
+        self.reports = reports
+        self.options = options
+        self.version_id = version_id
+        self.modules: dict[str, MypyFile] = {}
+        # Share same modules dictionary with the global fixer state.
+        # We need to set allow_missing when doing a fine-grained cache
+        # load because we need to gracefully handle missing modules.
+        modules_state.modules = self.modules
+        modules_state.node_fixer = NodeFixer(self.modules, self.options.use_fine_grained_cache)
+        self.import_map: dict[str, set[str]] = {}
+        self.missing_modules: dict[str, int] = {}
+        self.fg_deps_meta: dict[str, FgDepMeta] = {}
+        # fg_deps holds the dependencies of every module that has been
+        # processed. We store this in BuildManager so that we can compute
+        # dependencies as we go, which allows us to free ASTs and type information,
+        # saving a ton of memory on net.
+        self.fg_deps: dict[str, set[str]] = {}
+        # Always convert the plugin to a ChainedPlugin so that it can be manipulated if needed
+        if not isinstance(plugin, ChainedPlugin):
+            plugin = ChainedPlugin(options, [plugin])
+        self.plugin = plugin
+        # These allow quickly skipping logging and stats collection calls. Note
+        # that some stats impact mypy behavior, so be careful when skipping stats
+        # collection calls.
+        self.stats_enabled = self.options.dump_build_stats
+        self.logging_enabled = self.options.verbosity >= 1
+        self.tracing_enabled = self.options.verbosity >= 2
+        # Set of namespaces (module or class) that are being populated during semantic
+        # analysis and may have missing definitions.
+        self.incomplete_namespaces: set[str] = set()
+        self.semantic_analyzer = SemanticAnalyzer(
+            self.modules,
+            self.missing_modules,
+            self.incomplete_namespaces,
+            self.errors,
+            self.plugin,
+            self.import_map,
+        )
+        self.all_types: dict[Expression, Type] = {}  # Enabled by export_types
+        self.indirection_detector = TypeIndirectionVisitor()
+        self.stale_modules: set[str] = set()
+        self.rechecked_modules: set[str] = set()
+        self.flush_errors = flush_errors
+        has_reporters = reports is not None and reports.reporters
+        self.cache_enabled = (
+            options.incremental
+            and (not options.fine_grained_incremental or options.use_fine_grained_cache)
+            and not has_reporters
+        )
+        self.fscache = fscache
+        self.cwd = os.getcwd()
+        self.find_module_cache = FindModuleCache(
+            self.search_paths, self.fscache, self.options, source_set=self.source_set
+        )
+        for module in CORE_BUILTIN_MODULES:
+            if options.use_builtins_fixtures:
+                continue
+            path = self.find_module_cache.find_module(module, fast_path=True)
+            if not isinstance(path, str):
+                build_error(
+                    f'Failed to find builtin module "{module}", perhaps typeshed is broken?'
+                )
+            if is_typeshed_file(options.abs_custom_typeshed_dir, path) or is_stub_package_file(
+                path
+            ):
+                continue
+
+            self.errors.set_file(path, module, options)
+            self.error(None, f'This file shadows library module "{module}"', blocker=True)
+            self.note(
+                None, f'A user-defined top-level module with name "{module}" is not supported'
+            )
+            self.errors.raise_error()
+
+        if metastore is None:
+            metastore = create_metastore(options, parallel_worker=parallel_worker)
+        self.metastore = metastore
+
+        # a mapping from source files to their corresponding shadow files
+        # for efficient lookup
+        self.shadow_map: dict[str, str] = {}
+        if self.options.shadow_file is not None:
+            self.shadow_map = dict(self.options.shadow_file)
+        # a mapping from each file being typechecked to its possible shadow file
+        self.shadow_equivalence_map: dict[str, str | None] = {}
+        self.plugin = plugin
+        self.plugins_snapshot = plugins_snapshot
+        self.old_plugins_snapshot = read_plugins_snapshot(self)
+        if self.verbosity() >= 2:
+            self.trace(f"Plugins snapshot (fresh) {json.dumps(self.plugins_snapshot)}")
+        self.quickstart_state = read_quickstart_file(options, self.stdout)
+        # Fine grained targets (module top levels and top level functions) processed by
+        # the semantic analyzer, used only for testing. Currently used only by the new
+        # semantic analyzer. Tuple of module and target name.
+        self.processed_targets: list[tuple[str, str]] = []
+        # Missing stub packages encountered.
+        self.missing_stub_packages: set[str] = set()
+        # Cache for mypy ASTs that have completed semantic analysis
+        # pass 1. When multiple files are added to the build in a
+        # single daemon increment, only one of the files gets added
+        # per step and the others are discarded. This gets repeated
+        # until all the files have been added. This means that a
+        # new file can be processed O(n**2) times. This cache
+        # avoids most of this redundant work.
+        self.ast_cache: dict[str, tuple[MypyFile, list[ErrorInfo], str | None]] = {}
+        # Number of times we used GC optimization hack for fresh SCCs.
+        self.gc_freeze_cycles = 0
+        # Mapping from SCC id to corresponding SCC instance. This is populated
+        # in process_graph().
+        self.scc_by_id: dict[int, SCC] = {}
+        # Mapping from module id to the SCC it belongs to. This is populated
+        # in process_graph().
+        self.scc_by_mod_id: dict[str, SCC] = {}
+        # Global topological order for SCCs. This exists to make order of processing
+        # SCCs more predictable.
+        self.top_order: list[int] = []
+        # Stale SCCs that are queued for processing. Each tuple contains SCC size hint,
+        # SCC adding order (tie-breaker), and the SCC itself.
+        self.scc_queue: list[tuple[int, int, SCC]] = []
+        # Total size hint for SCCs currently in queue.
+        self.size_in_queue: int = 0
+        # SCCs that have been fully processed.
+        self.done_sccs: set[int] = set()
+        # Parallel build workers, list is empty for in-process type-checking.
+        self.workers: list[WorkerClient] = []
+        # We track which workers are currently free in the coordinator process.
+        # This is a tiny bit faster and conceptually simpler than check which ones
+        # are writeable each time we want to submit an SCC for processing.
+        self.free_workers: set[int] = set()
+        # A global adding order for SCC queue, see comment above.
+        self.queue_order: int = 0
+        # Is this an instance used by a parallel worker?
+        self.parallel_worker = parallel_worker
+        # Snapshot of import-related options per module. We record these even for
+        # suppressed imports, since they can affect errors in the callers. Bytes
+        # value is opaque but can be compared to detect changes in options.
+        self.import_options: dict[str, bytes] = {}
+        # Cache for transitive dependency check (expensive).
+        self.transitive_deps_cache: dict[tuple[int, int], bool] = {}
+        # Cache for options_snapshot() keyed by the cloned Options. Options is
+        # hashed by identity, and most modules share a handful of distinct
+        # configs, so this collapses ~all calls onto a few entries.
+        self.options_snapshot_cache: dict[Options, tuple[str, str]] = {}
+        # Packages for which we know presence or absence of __getattr__().
+        self.known_partial_packages: dict[str, bool] = {}
+
+    def dump_stats(self) -> None:
+        if self.stats_enabled:
+            lines = ["Stats:"]
+            for key, value in sorted(self.stats_summary().items()):
+                fmt = ".3f" if isinstance(value, float) else "d"
+                lines.append(f"{key + ':':24}{value:{fmt}}")
+            # Call print once so that we don't get a mess in parallel mode.
+            print("\n".join(lines) + "\n\n", end="")
+
+    def parse_all(self, states: list[State], post_parse: bool = True) -> None:
+        """Parse multiple files in parallel (if possible) and compute dependencies.
+
+        If post_parse is False, skip the last step (used when parsing unchanged files
+        that need to be re-checked due to stale dependencies).
+        """
+        if not self.options.native_parser:
+            # Old parser cannot be parallelized.
+            for state in states:
+                state.parse_file()
+            if post_parse:
+                self.post_parse_all(states)
+            return
+
+        parallel_states = []
+        for state in states:
+            if not self.fscache.exists(state.xpath, real_only=True) or (
+                self.shadow_map and self.maybe_swap_for_shadow_path(state.xpath) != state.xpath
+            ):
+                state.source = state.get_source()
+            if state.tree is not None:
+                # The file was already parsed.
+                state.needs_parse = False
+                continue
+            parallel_states.append(state)
+
+        if len(parallel_states) > 1:
+            # This duplicates a bit of logic from State.parse_file(). This is done as an
+            # optimization to parallelize only those parts of the code that can be
+            # parallelized efficiently.
+
+            parallel_parsed_states, parallel_parsed_states_set = self.parse_files_threaded_raw(
+                parallel_states
+            )
+
+            for state in parallel_parsed_states:
+                # New parser only returns serialized ASTs
+                with state.wrap_context():
+                    assert state.tree is not None
+                    raw_data = state.tree.raw_data
+                    if raw_data is not None:
+                        # Apply inline mypy config before deserialization, since
+                        # some options (e.g. implicit_optional) affect how the
+                        # AST is built during deserialization.
+                        state.source_hash = raw_data.source_hash
+                        state.apply_inline_configuration(raw_data.mypy_comments)
+                        state.tree = load_from_raw(
+                            state.xpath,
+                            state.id,
+                            raw_data,
+                            self.errors,
+                            state.options,
+                            imports_only=bool(self.workers),
+                        )
+                    if self.errors.is_blockers():
+                        self.log("Bailing due to parse errors")
+                        self.errors.raise_error()
+
+            for state in parallel_states:
+                assert state.tree is not None
+                if state in parallel_parsed_states_set:
+                    if state.tree.raw_data is not None:
+                        # source_hash was already extracted above, but raw_data
+                        # may have been preserved for workers (imports_only=True).
+                        pass
+                    elif state.source_hash is None:
+                        # At least namespace packages may not have source.
+                        state.get_source()
+                    state.early_errors = list(self.errors.error_info_map.get(state.xpath, []))
+                    state.semantic_analysis_pass1()
+                    self.ast_cache[state.id] = (state.tree, state.early_errors, state.source_hash)
+                self.modules[state.id] = state.tree
+                if state.tree.raw_data is not None:
+                    state.size_hint = len(state.tree.raw_data.defs) + MIN_SIZE_HINT
+                state.check_blockers()
+                state.setup_errors()
+        elif len(parallel_states) == 1:
+            # Avoid using executor when there is no parallelism.
+            parallel_states[0].parse_file()
+
+        if post_parse:
+            self.post_parse_all(states)
+
+    def parse_files_threaded_raw(self, states: list[State]) -> tuple[list[State], set[State]]:
+        """Parse files in parallel using a thread pool.
+
+        Trees from the new parser are left in raw (serialized) form.
+
+        Return (list, set) of states that were actually parsed (not cached).
+        """
+        futures = []
+        # Use both list and a set to have more predictable order of errors,
+        # while also not sacrificing performance.
+        parallel_parsed_states: list[State] = []
+        parallel_parsed_states_set: set[State] = set()
+        # Use at least --num-workers if specified by user.
+        available_threads = max(get_available_threads(), self.options.num_workers)
+        # Overhead from trying to parallelize (small) blocking portion of
+        # parse_file_inner() results in no visible improvement with more than 8 threads.
+        # TODO: reuse thread pool and/or batch small files in single submit() call.
+        with ThreadPoolExecutor(max_workers=min(available_threads, 8)) as executor:
+            for state in states:
+                state.needs_parse = False
+                if state.id not in self.ast_cache:
+                    self.log(f"Parsing {state.xpath} ({state.id})")
+                    ignore_errors = state.ignore_all or state.options.ignore_errors
+                    if ignore_errors:
+                        self.errors.ignored_files.add(state.xpath)
+                    futures.append(executor.submit(state.parse_file_inner, state.source))
+                    parallel_parsed_states.append(state)
+                    parallel_parsed_states_set.add(state)
+                else:
+                    self.log(f"Using cached AST for {state.xpath} ({state.id})")
+                    state.tree, state.early_errors, sour

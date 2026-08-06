@@ -7,6 +7,63 @@ project evolves.)
 
 ---
 
+## 2026-08-05 — Files only: paste removed, buttons renamed, Analysis button added
+
+- **Paste is gone; upload and sample are the only two inputs.** Requested
+  directly, and it fits what the tool is for: the thesis compares *files*
+  (prose vs code, short vs long), and a textarea invited one-off snippets
+  that land in the stored-inputs list without being reproducible later —
+  an uploaded file is kept in `data/uploads/`, a pasted paragraph exists
+  only as a database row. `_resolve_input()` no longer reads `text` at all,
+  the textarea is out of `index.html`, and the "provide some text" flash
+  became "Choose an input: upload a file or pick a sample."
+
+- **The Clean → Run handoff had to be rebuilt**, because it was riding on
+  the textarea: `/clean` used to drop cleaned text into the box, and since
+  a re-render clears the file input and sample dropdown, the box was what
+  the following Run picked up. With no box, the cleaned text now travels in
+  a **hidden field** (`cleaned_text`, plus `cleaned_label` so a cleaned run
+  keeps the sample name or filename instead of a 30-character text
+  fragment) and is displayed **read-only** in a `<pre>` — read-only
+  because it's machine-produced output to check, not something to keep
+  editing. `_resolve_input()`'s priority is unchanged in spirit —
+  **sample > upload > carried cleaned text** — so picking a new file after
+  cleaning analyses the new file, not stale text.
+
+- **`was_cleaned` (hidden form flag) deleted; `cleaned` is now derived.**
+  `_resolve_input()` returns a 4th value saying whether the text came from
+  the cleaned carrier, and `run()` stores that. The old flag could lie: it
+  persisted across a re-render, so cleaning a file and *then* picking a
+  different sample would have stored the new, uncleaned text tagged
+  `cleaned=1` — and the results plot titles itself "Cleaned" off that
+  column. Deriving provenance from which source actually won makes the
+  wrong state unrepresentable rather than merely unlikely.
+
+- **Line endings are re-normalized on the way back out of the hidden
+  field.** A hidden-input round-trip can return `\n` as `\r\n`, which would
+  make the analysed text differ from the text just displayed — different
+  hash, different results page, cleaning silently undone for `code` (whose
+  rules guarantee `\n`). Both cleaning rules already promise `\n` only, so
+  redoing that one conversion is a no-op on untouched text and a repair
+  otherwise. Verified by feeding a CRLF-mangled carrier through `/run` and
+  checking the stored hash matches the clean version's.
+
+- **Button renames and the new Analysis button**: "Run analysis" → **"Run
+  BPE"** (it names the operation, and stops colliding with the *other*
+  meaning of "analysis" now that a page owns that word); **Analysis** added
+  to the home page next to Clean and Run BPE. It's an `<a class="button">`,
+  not a `<button>` — it navigates rather than acting on the form, and a
+  submit button inside the form would post the form to `/analysis`. New
+  `a.button` rule in `base.html` shares the existing button styling. The
+  header link stays too, since it serves the results and analysis pages
+  where there's no form at all.
+
+- **The JSON API keeps its `text` field.** It looks like the same thing but
+  isn't: for an HTTP client, a JSON body *is* the upload mechanism — there
+  is no file picker to use instead. Removing it would leave
+  `POST /api/experiments` able to analyse nothing but the two bundled
+  samples.
+
 ## 2026-08-05 — Elbow detection, a per-file summary table, and a cross-file analysis page
 
 - **Why**: everything the app did up to here answered a *within-one-input*

@@ -484,8 +484,8 @@ zero setup.
 
 - **`input_hash(text)`** — first 16 hex characters of the SHA-256 of the
   text. This is the app's addressing scheme: results pages live at
-  `/results/<ihash>`, so the same text pasted twice (even under different
-  labels or categories) hashes to the same address and lands on the same
+  `/results/<ihash>`, so the same file submitted twice (even under a
+  different filename or category) hashes to the same address and lands on the same
   results page — a hash's results page can therefore show rows from both
   categories side by side, though never a mix of cleaned and raw, since
   those are different text and so different hashes entirely.
@@ -544,15 +544,28 @@ algorithm and no SQL beyond calls into `db.py`. Two module-level constants,
 envelope — the naive O(n)-per-merge algorithm stays comfortably fast inside
 these caps.
 
-- **`_resolve_input()`** — turns the three input mechanisms (paste, upload,
-  sample) into a `(label, text, category)` triple, with priority
-  **sample > upload > paste**. Uploads are decoded as UTF-8 with
+- **`_resolve_input()`** — turns the form into a
+  `(label, text, category, cleaned)` tuple. There are exactly **two ways to
+  supply text: upload a file, or pick a bundled sample** — there's no paste
+  box. (Pasting existed once and was removed: this is a tool for analysing
+  *files*, and a textarea invited ad-hoc snippets that clutter the stored-
+  inputs list without being reproducible later.) A third source exists but
+  isn't user-typed input — the cleaned text carried back from a previous
+  **Clean** click in a hidden field — and the priority is
+  **sample > upload > carried cleaned text**, so picking a new source after
+  cleaning analyses the new source rather than stale text. `cleaned` is
+  derived from *which* source won rather than from a form flag, so a row
+  can't be mislabelled as cleaned. The carrier's line endings are
+  re-normalized on the way back in, since a hidden field round-trip can
+  turn `\n` into `\r\n` and the analysed text must be byte-identical to the
+  text just shown. Uploads are decoded as UTF-8 with
   `errors="replace"`, so a binary or oddly-encoded file degrades into
   replacement characters instead of a server error. A copy of every upload
   is kept in `data/uploads/` so the exact file behind an experiment can be
-  revisited later. The label for pasted text is just its first 30
-  characters — the label is only a human-friendly handle; the text's
-  content hash is what actually identifies it. `category` comes from a
+  revisited later. The label is the sample name or the uploaded filename,
+  and a Clean click carries that same label through so a cleaned run stays
+  recognisable — the label is only a human-friendly handle either way; the
+  text's content hash is what actually identifies it. `category` comes from a
   required form field and is read the same way regardless of input source
   — even when a sample is picked, the user still has to explicitly select
   a category (the two bundled samples happen to match their own category,
@@ -568,7 +581,7 @@ these caps.
 
 - **`index()` / `_render_index(**prefill)`** — the home page: one query for
   the stored-inputs list, plus optional keyword args (`prefill_text`,
-  `prefill_category`, `prefill_cleaned`, `prefill_k_max`, `prefill_k_step`)
+  `prefill_label`, `prefill_category`, `prefill_k_max`, `prefill_k_step`)
   that populate the form when it's being re-rendered right after a Clean
   action rather than loaded fresh. `index()` itself just calls
   `_render_index()` with no prefill.
@@ -576,21 +589,19 @@ these caps.
 - **`clean()`** — `POST /clean`, a sibling to `run()` that shares its
   input-resolution and validation but does something different with the
   result: it calls `bpe.normalize(text, category)` and re-renders the
-  *index* page with the cleaned text sitting in the textarea (via
-  `_render_index`), rather than saving anything or redirecting anywhere.
-  Nothing is written to the database — cleaning is a preview/transform
-  step the user can inspect before deciding to analyse. The re-rendered
-  form also carries a hidden `was_cleaned=1` field, so if the user then
-  clicks **Run analysis** on that same page, `run()` knows the text in the
-  box has already been cleaned (purely for the `cleaned` column's sake —
-  it doesn't change how `run()` processes the text).
+  *index* page showing the cleaned text read-only (via `_render_index`),
+  rather than saving anything or redirecting anywhere. Nothing is written
+  to the database — cleaning is a preview/transform step the user can
+  inspect before deciding to analyse. The cleaned text and its label ride
+  along in hidden fields, which is how the next **Run BPE** click gets
+  hold of exactly the text on screen; since the file input and sample
+  dropdown come back empty on a re-render, that carrier is what
+  `_resolve_input()` falls through to.
 
-- **`run()`** — the POST handler for **Run analysis**, and the app's one
+- **`run()`** — the POST handler for **Run BPE**, and the app's one
   real "controller" for actually producing results. It resolves the
   input, validates it (empty, too large, non-numeric k — each with a
-  flash message and a redirect rather than a server error), reads the
-  `was_cleaned` hidden field (defaulting to not-cleaned if absent — it's
-  provenance, not a required choice), then for each k in the sweep checks
+  flash message and a redirect rather than a server error), then for each k in the sweep checks
   the database first and skips work already done. This check-before-
   compute loop is what makes sweeps incremental: a second sweep with a
   finer step only computes the new k values, and identical re-runs cost
@@ -659,20 +670,24 @@ nothing.
   the title links home, and a **Cross-file analysis** link sits beside it,
   so `/analysis` is reachable from every page rather than only from the
   home page.
-- **`index.html`** — one form containing all three input methods, a
-  required category radio group (Source code / English language), the k
-  and step fields, and two submit buttons — **Clean** and **Run
-  analysis** — that post to two genuinely different endpoints (`/clean`
-  and `/run`) via HTML's `formaction` attribute rather than sharing one
-  endpoint distinguished by a value, so they read as the separate actions
-  they are. The textarea, category radios, and k/step fields all accept
-  optional `prefill_*` template variables so the form can be re-rendered
-  with the just-cleaned text in place after a Clean action, without
-  needing a redirect or session storage. Below the form, the stored-inputs
-  table has a Category column and per-input delete buttons — no Cleaned
-  column; that only shows up as a word on the results-page plot (see
-  `plot()` in `app.py` above). Keeping paste/upload/sample in a single
-  form (rather than tabs) is what makes the fixed priority order in
+- **`index.html`** — one form containing both input methods (file upload,
+  sample dropdown), a required category radio group (Source code / English
+  language), the k and step fields, and three controls: **Clean** and
+  **Run BPE**, two submit buttons posting to two genuinely different
+  endpoints (`/clean` and `/run`) via HTML's `formaction` attribute rather
+  than sharing one endpoint distinguished by a value, so they read as the
+  separate actions they are; plus **Analysis**, which is a link to
+  `/analysis` styled as a button (`a.button`) rather than a submit — it
+  navigates, it doesn't act on the form, so it must not be able to submit
+  it. After a Clean, the page also shows the cleaned text in a read-only
+  `<pre>` (first 2,000 characters) with the full text and its label in
+  hidden fields — read-only because the text is now machine-produced
+  output to check, not something to keep editing, and hidden-field carriage
+  is what avoids a redirect or session storage. Below the form, the
+  stored-inputs table has a Category column and per-input delete buttons —
+  no Cleaned column; that only shows up as a word on the results-page plot
+  (see `plot()` in `app.py` above). Keeping upload/sample in a single form
+  (rather than tabs) is what makes the fixed priority order in
   `_resolve_input()` the only conflict-resolution logic needed.
 - **`results.html`** — the plot (`<img src="{{ url_for('plot', ihash=ihash) }}">`),
   the stats table (one row per k, plus a Category column since a single
@@ -750,9 +765,9 @@ suite can never touch a real `experiments.db`.
 
 ## Using it
 
-1. Provide text one of three ways: **paste** it, **upload** a file, or pick
-   a built-in **sample** (English prose or Python code). If more than one is
-   given, priority is: sample → upload → pasted text.
+1. Provide a file one of two ways: **upload** it, or pick a built-in
+   **sample** (English prose or Python code). Those are the only two input
+   methods — there's no paste box. If both are given, the sample wins.
 2. Choose a **category** — Source code or English language. This is
    required and never inferred: it decides which cleaning rules the Clean
    button would apply (indentation is preserved for code, collapsed for
@@ -760,26 +775,27 @@ suite can never touch a real `experiments.db`.
 3. Choose **k** (max merges, up to 2000) and optionally a **sweep step**
    (0 means a single run at k).
 4. Optionally click **Clean** first — it applies the category's cleaning
-   rules and puts the result back in the text box for you to check,
-   without running anything yet. Then click **Run analysis**, which runs
-   BPE on whatever's currently in the box, cleaned or not. You land on the
+   rules and shows you the result to check, without running anything yet.
+   Then click **Run BPE**: it analyses the cleaned text if you've just
+   cleaned, and the file or sample you picked otherwise. You land on the
    results page with a graph and a table of every stored run for that
    exact text.
-5. Open **Cross-file analysis** (linked in the header of every page) to see
-   every input analysed so far in one table, with its elbow k and how much
-   of the available compression that elbow captures, plus both against
-   input size as scatter plots. Every run adds to this page automatically —
-   there's nothing extra to click.
+5. Click **Analysis** (button on the home page, or the header link on every
+   page) to see every input analysed so far in one table, with its elbow k
+   and how much of the available compression that elbow captures, plus both
+   against input size as scatter plots. Every run adds to this page
+   automatically — there's nothing extra to click.
 
 Limits: input up to 200,000 characters, k up to 2000.
 
 To compare cleaned vs. raw, or one category's cleaning against the
-other's, just run both: paste the same text, click **Run analysis**
-directly for the raw baseline, then reload the form, paste it again,
-click **Clean** then **Run analysis** for the cleaned version (or switch
-category first). Since cleaning changes the text, each combination lands
-on its own results page with its own graph — there's no single page that
-merges them, by design; compare the two pages side by side instead.
+other's, just run both: pick the file and click **Run BPE** straight away
+for the raw baseline, then pick it again and click **Clean** followed by
+**Run BPE** for the cleaned version (or switch category first). Since
+cleaning changes the text, each combination lands on its own results page
+with its own graph — there's no single page that merges them, by design;
+compare the two pages side by side, or use `/analysis` to see them as
+separate points.
 
 ## Data storage and deduplication
 
@@ -792,8 +808,8 @@ merges them, by design; compare the two pages side by side instead.
   the same text can deliberately be run under both to compare the effect.
   `cleaned` is recorded per row but isn't part of this key — see below.
 - Inputs are grouped by a short **SHA-256 hash** of the text, so the same
-  text pasted twice — even under different labels or categories — lands
-  on the same results page, which can then show rows from both categories
+  file submitted twice — even under a different filename or category —
+  lands on the same results page, which can then show rows from both categories
   side by side. A cleaned and a raw run are never on the same page: since
   cleaning changes the text, they hash differently and get separate
   results pages, each with its own graph.

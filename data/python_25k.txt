@@ -1,0 +1,610 @@
+ce_hash = self.ast_cache[state.id]
+                    state.source_hash = source_hash
+
+            for fut in wait(futures).done:
+                fut.result()
+
+        return parallel_parsed_states, parallel_parsed_states_set
+
+    def post_parse_all(self, states: list[State]) -> None:
+        for state in states:
+            state.compute_dependencies()
+            if self.workers and state.tree:
+                # We don't need imports in coordinator process anymore, we parse only to
+                # compute dependencies.
+                state.tree.imports = []
+                del self.ast_cache[state.id]
+
+    def use_fine_grained_cache(self) -> bool:
+        return self.cache_enabled and self.options.use_fine_grained_cache
+
+    def maybe_swap_for_shadow_path(self, path: str) -> str:
+        if not self.shadow_map:
+            return path
+
+        path = normpath(path, self.options)
+
+        previously_checked = path in self.shadow_equivalence_map
+        if not previously_checked:
+            for source, shadow in self.shadow_map.items():
+                if self.fscache.samefile(path, source):
+                    self.shadow_equivalence_map[path] = shadow
+                    break
+                else:
+                    self.shadow_equivalence_map[path] = None
+
+        shadow_file = self.shadow_equivalence_map.get(path)
+        return shadow_file if shadow_file else path
+
+    def get_stat(self, path: str) -> os.stat_result | None:
+        return self.fscache.stat_or_none(self.maybe_swap_for_shadow_path(path))
+
+    def getmtime(self, path: str) -> int:
+        """Return a file's mtime; but 0 in bazel mode.
+
+        (Bazel's distributed cache doesn't like filesystem metadata to
+        end up in output files.)
+        """
+        if self.options.bazel:
+            return 0
+        else:
+            return int(self.metastore.getmtime(path))
+
+    def correct_rel_imp(self, file: MypyFile, imp: ImportFrom | ImportAll) -> str:
+        """Function to correct for relative imports."""
+        file_id = file.fullname
+        rel = imp.relative
+        if rel == 0:
+            return imp.id
+        if os.path.basename(file.path).startswith("__init__."):
+            rel -= 1
+        if rel != 0:
+            file_id = ".".join(file_id.split(".")[:-rel])
+        new_id = file_id + "." + imp.id if imp.id else file_id
+
+        if not new_id:
+            self.errors.set_file(file.path, file.name, self.options)
+            self.error(
+                imp.line, "No parent module -- cannot perform relative import", blocker=True
+            )
+
+        return new_id
+
+    def all_imported_modules_in_file(self, file: MypyFile) -> list[tuple[int, str, int]]:
+        """Find all reachable import statements in a file.
+
+        Return list of tuples (priority, module id, import line number)
+        for all modules imported in file; lower numbers == higher priority.
+
+        Can generate blocking errors on bogus relative imports.
+        """
+        res: list[tuple[int, str, int]] = []
+        for imp in file.imports:
+            if not imp.is_unreachable:
+                if isinstance(imp, Import):
+                    pri = import_priority(imp, PRI_MED)
+                    ancestor_pri = import_priority(imp, PRI_LOW)
+                    for id, _ in imp.ids:
+                        res.append((pri, id, imp.line))
+                        ancestor_parts = id.split(".")[:-1]
+                        ancestors = []
+                        for part in ancestor_parts:
+                            ancestors.append(part)
+                            res.append((ancestor_pri, ".".join(ancestors), imp.line))
+                elif isinstance(imp, ImportFrom):
+                    cur_id = self.correct_rel_imp(file, imp)
+                    all_are_submodules = True
+                    # Also add any imported names that are submodules.
+                    pri = import_priority(imp, PRI_MED)
+                    for name, __ in imp.names:
+                        sub_id = cur_id + "." + name
+                        if self.is_module(sub_id):
+                            res.append((pri, sub_id, imp.line))
+                        else:
+                            all_are_submodules = False
+                    # Add cur_id as a dependency, even if all the
+                    # imports are submodules. Processing import from will try
+                    # to look through cur_id, so we should depend on it.
+                    # As a workaround for some bugs in cycle handling (#4498),
+                    # if all the imports are submodules, do the import at a lower
+                    # priority.
+                    pri = import_priority(imp, PRI_HIGH if not all_are_submodules else PRI_LOW)
+                    res.append((pri, cur_id, imp.line))
+                elif isinstance(imp, ImportAll):
+                    pri = import_priority(imp, PRI_HIGH)
+                    res.append((pri, self.correct_rel_imp(file, imp), imp.line))
+
+        # Sort such that module (e.g. foo.bar.baz) comes before its ancestors (e.g. foo
+        # and foo.bar) so that, if FindModuleCache finds the target module in a
+        # package marked with py.typed underneath a namespace package installed in
+        # site-packages, (gasp), that cache's knowledge of the ancestors
+        # (aka FindModuleCache.ns_ancestors) can be primed when it is asked to find
+        # the parent.
+        res.sort(key=lambda x: -x[1].count("."))
+        return res
+
+    def is_module(self, id: str) -> bool:
+        """Does the given fullname refer to a module?
+
+        Note: this does not always verify that the module exists and relies on
+        previously executed logic in find_module_and_diagnose().
+        """
+        if id in self.modules:
+            # Micro-optimization, if we already found it, it is definitely a module.
+            return True
+        if id in self.source_set.source_modules:
+            # Special case: if a module is passed on command line, we accept it even
+            # if we would not resolve it using regular mechanisms. This makes behavior
+            # consistent in cases like `mypy foo-stubs`, where stubs are not installed.
+            return True
+        return find_module_simple(id, self) is not None
+
+    def parse_file(
+        self,
+        id: str,
+        path: str,
+        source: str | None,
+        options: Options,
+        raw_data: FileRawData | None = None,
+    ) -> MypyFile:
+        """Parse the source of a file with the given name.
+
+        Raise CompileError if there is a parse error.
+        """
+        t0 = time.time()
+        if raw_data:
+            # If possible, deserialize from known binary data instead of parsing from scratch.
+            tree = load_from_raw(path, id, raw_data, self.errors, options)
+        else:
+            tree = parse(source, path, id, self.errors, options=options)
+        tree._fullname = id
+        if self.stats_enabled:
+            with self.stats_lock:
+                self.add_stats(
+                    files_parsed=1,
+                    modules_parsed=int(not tree.is_stub),
+                    stubs_parsed=int(tree.is_stub),
+                    parse_time=time.time() - t0,
+                )
+        return tree
+
+    def load_fine_grained_deps(self, id: str) -> dict[str, set[str]]:
+        t0 = time.time()
+        if id in self.fg_deps_meta:
+            # TODO: Assert deps file wasn't changed.
+            deps = json_loads(self.metastore.read(self.fg_deps_meta[id]["path"]))
+        else:
+            deps = {}
+        val = {k: set(v) for k, v in deps.items()}
+        self.add_stats(load_fg_deps_time=time.time() - t0)
+        return val
+
+    def report_file(
+        self, file: MypyFile, type_map: dict[Expression, Type], options: Options
+    ) -> None:
+        if self.reports is not None and self.source_set.is_source(file):
+            self.reports.file(file, self.modules, type_map, options)
+
+    def commit(self) -> None:
+        t0 = time.time()
+        self.metastore.commit()
+        self.add_stats(cache_commit_time=time.time() - t0)
+
+    def commit_module(self, meta_file: str) -> None:
+        """Commit cache writes for a single module (identified by its meta file path)."""
+        self.metastore.commit_path(meta_file)
+
+    def verbosity(self) -> int:
+        return self.options.verbosity
+
+    def log(self, *message: str) -> None:
+        if self.verbosity() >= 1:
+            if message:
+                print("LOG: ", *message, file=self.stderr)
+            else:
+                print(file=self.stderr)
+            self.stderr.flush()
+
+    def log_fine_grained(self, *message: str) -> None:
+        if self.verbosity() >= 1:
+            self.log("fine-grained:", *message)
+        elif mypy.build.DEBUG_FINE_GRAINED:
+            # Output log in a simplified format that is quick to browse.
+            if message:
+                print(*message, file=self.stderr)
+            else:
+                print(file=self.stderr)
+            self.stderr.flush()
+
+    def trace(self, *message: str) -> None:
+        if self.verbosity() >= 2:
+            print("TRACE:", *message, file=self.stderr)
+            self.stderr.flush()
+
+    def add_stats(self, **kwds: Any) -> None:
+        for key, value in kwds.items():
+            if key in self.stats:
+                self.stats[key] += value
+            else:
+                self.stats[key] = value
+
+    def stats_summary(self) -> Mapping[str, object]:
+        return self.stats
+
+    def broadcast(self, message: bytes) -> None:
+        """Broadcast same message to all workers in parallel."""
+        t0 = time.time()
+        threads = []
+        for worker in self.workers:
+            thread = Thread(target=worker.conn.write_bytes, args=(message,))
+            thread.start()
+            threads.append(thread)
+        for thread in threads:
+            thread.join()
+        self.add_stats(broadcast_time=time.time() - t0)
+
+    def wait_ack(self) -> None:
+        """Wait for an ack from all workers."""
+        for idx in range(len(self.workers)):
+            buf = self.receive_worker_message(idx)
+            assert read_tag(buf) == ACK_MESSAGE
+
+    def receive_worker_message(self, idx: int) -> ReadBuffer:
+        """Receive a single message from a worker, with crash diagnostics."""
+        try:
+            return receive(self.workers[idx].conn)
+        except OSError as exc:
+            try:
+                # Give worker process a chance to actually terminate before reporting.
+                exit_code = self.workers[idx].proc.wait(timeout=WORKER_SHUTDOWN_TIMEOUT)
+            except TimeoutError:
+                exit_code = None
+            exit_status = f"exit code {exit_code}" if exit_code is not None else "still running"
+            raise OSError(
+                f"Worker {idx} disconnected before sending data ({exit_status})"
+            ) from exc
+
+    def submit(self, graph: Graph, sccs: list[SCC]) -> None:
+        """Submit a stale SCC for processing in current process or parallel workers."""
+        if self.workers:
+            self.submit_to_workers(graph, sccs)
+        else:
+            self.scc_queue.extend([(0, 0, scc) for scc in sccs])
+
+    def get_scc_batch(self, max_size_in_batch: int) -> list[SCC]:
+        """Get a batch of SCCs from queue to submit to a worker.
+
+        We batch SCCs to avoid communication overhead, but to avoid
+        long poles, we limit fraction of work per worker.
+        """
+        batch: list[SCC] = []
+        size_in_batch = 0
+        while self.scc_queue and (
+            # Three notes keep in mind here:
+            #   * Heap key is *negative* size (so that larger SCCs appear first).
+            #   * Each batch must have at least one item.
+            #   * Adding another SCC to batch should not exceed maximum allowed size.
+            size_in_batch - self.scc_queue[0][0] <= max_size_in_batch
+            or not batch
+        ):
+            size_key, _, scc = heappop(self.scc_queue)
+            size_in_batch -= size_key
+            self.size_in_queue += size_key
+            batch.append(scc)
+        return batch
+
+    def max_batch_size(self) -> int:
+        batch_frac = 1 / len(self.workers)
+        if sys.platform == "linux":
+            # Linux is good with socket roundtrip latency, so we can use
+            # more fine-grained batches.
+            batch_frac /= 2
+        return int(self.size_in_queue * batch_frac)
+
+    def submit_to_workers(self, graph: Graph, sccs: list[SCC] | None = None) -> None:
+        if sccs is not None:
+            for scc in sccs:
+                heappush(self.scc_queue, (-scc.size_hint, self.queue_order, scc))
+                self.size_in_queue += scc.size_hint
+                self.queue_order += 1
+        max_size_in_batch = self.max_batch_size()
+        while self.scc_queue and self.free_workers:
+            idx = self.free_workers.pop()
+            scc_batch = self.get_scc_batch(max_size_in_batch)
+            import_errors = {
+                mod_id: self.errors.recorded[path]
+                for scc in scc_batch
+                for mod_id in scc.mod_ids
+                if (path := graph[mod_id].xpath) in self.errors.recorded
+            }
+            t0 = time.time()
+            send(
+                self.workers[idx].conn,
+                SccRequestMessage(
+                    scc_ids=[scc.id for scc in scc_batch],
+                    import_errors=import_errors,
+                    mod_data={
+                        mod_id: (
+                            # Although workers don't really need to know about details
+                            # of dependencies, they will write cache, so we need to pass
+                            # suppressed_deps_opts() as part of module data.
+                            graph[mod_id].suppressed_deps_opts(),
+                            tree.raw_data if (tree := graph[mod_id].tree) else None,
+                        )
+                        for scc in scc_batch
+                        for mod_id in scc.mod_ids
+                    },
+                ),
+            )
+            self.add_stats(scc_requests_sent=1, scc_send_time=time.time() - t0)
+
+    def wait_for_done(self, graph: Graph) -> tuple[list[SCC], bool, dict[str, ModuleResult]]:
+        """Wait for a stale SCC processing to finish.
+
+        Return a tuple three items:
+          * processed SCCs
+          * whether we have more in the queue
+          * new interface hash or list of errors for each module
+        The last item is only used for parallel processing.
+        """
+        if self.workers:
+            return self.wait_for_done_workers(graph)
+        if not self.scc_queue:
+            return [], False, {}
+        _, _, next_scc = self.scc_queue.pop(0)
+        process_stale_scc(graph, next_scc, self)
+        return [next_scc], bool(self.scc_queue), {}
+
+    def wait_for_done_workers(
+        self, graph: Graph
+    ) -> tuple[list[SCC], bool, dict[str, ModuleResult]]:
+        if not self.scc_queue and len(self.free_workers) == len(self.workers):
+            return [], False, {}
+
+        done_sccs = []
+        results = {}
+        t0 = time.time()
+        ready = ready_to_read([w.conn for w in self.workers], WORKER_DONE_TIMEOUT)
+        t1 = time.time()
+        for idx in ready:
+            buf = self.receive_worker_message(idx)
+            assert read_tag(buf) == SCC_RESPONSE_MESSAGE
+            data = SccResponseMessage.read(buf)
+            if not data.is_interface:
+                # Mark worker as free after it finished checking implementation.
+                self.free_workers.add(idx)
+            if data.blocker is not None:
+                raise data.blocker
+            assert data.result is not None
+            results.update(data.result)
+            if data.is_interface:
+                done_sccs.extend([self.scc_by_id[scc_id] for scc_id in data.scc_ids])
+        self.add_stats(scc_wait_time=t1 - t0, scc_receive_time=time.time() - t1)
+        self.submit_to_workers(graph)  # advance after some workers are free.
+        return (
+            # Note that "done" means interface-ready in this context. This is what
+            # the caller should expect.
+            done_sccs,
+            bool(self.scc_queue) or len(self.free_workers) < len(self.workers),
+            results,
+        )
+
+    def is_transitive_scc_dep(self, from_scc_id: int, to_scc_id: int) -> bool:
+        """Check if one SCC is a (transitive) dependency of another."""
+        edge = (from_scc_id, to_scc_id)
+        if (cached := self.transitive_deps_cache.get(edge)) is not None:
+            return cached
+        todo = self.scc_by_id[from_scc_id].deps
+        seen = set()
+        while todo:
+            more = set()
+            # Breadth-first search seems to be better here, because all
+            # "lower-level" SCCs are processed and some may be cached.
+            for dep in todo:
+                seen.add(dep)
+                if dep == to_scc_id:
+                    self.transitive_deps_cache[edge] = True
+                    return True
+                if cached := self.transitive_deps_cache.get((dep, to_scc_id)):
+                    self.transitive_deps_cache[edge] = True
+                    return True
+                elif cached is None:
+                    more |= self.scc_by_id[dep].deps
+            todo = more
+        self.transitive_deps_cache[edge] = False
+        for dep in seen:
+            # We negative-cache all intermediate lookups, thus
+            # trading time for space.
+            self.transitive_deps_cache[(dep, to_scc_id)] = False
+        return False
+
+    def error(
+        self,
+        line: int | None,
+        msg: str,
+        code: ErrorCode | None = None,
+        *,
+        blocker: bool = False,
+        only_once: bool = False,
+    ) -> None:
+        if line is None:
+            line = column = -1
+        else:
+            column = 0
+        self.errors.report(line, column, msg, code, blocker=blocker, only_once=only_once)
+
+    def note(
+        self, line: int | None, msg: str, code: ErrorCode | None = None, *, only_once: bool = False
+    ) -> None:
+        if line is None:
+            line = column = -1
+        else:
+            column = 0
+        self.errors.report(line, column, msg, code, severity="note", only_once=only_once)
+
+    def note_multiline(
+        self, line: int | None, msg: str, code: ErrorCode | None = None, *, only_once: bool = False
+    ) -> None:
+        for msg_line in dedent(msg.lstrip("\n")).splitlines():
+            self.note(line, msg_line, code, only_once=only_once)
+
+
+def deps_to_json(x: dict[str, set[str]]) -> bytes:
+    return json_dumps({k: list(v) for k, v in x.items()})
+
+
+# File for storing metadata about all the fine-grained dependency caches
+DEPS_META_FILE: Final = "@deps.meta.json"
+# File for storing fine-grained dependencies that didn't a parent in the build
+DEPS_ROOT_FILE: Final = "@root.deps.json"
+
+# The name of the fake module used to store fine-grained dependencies that
+# have no other place to go.
+FAKE_ROOT_MODULE: Final = "@root"
+
+
+def write_deps_cache(
+    rdeps: dict[str, dict[str, set[str]]], manager: BuildManager, graph: Graph
+) -> None:
+    """Write cache files for fine-grained dependencies.
+
+    Serialize fine-grained dependencies map for fine-grained mode.
+
+    Dependencies on some module 'm' is stored in the dependency cache
+    file m.deps.json.  This entails some spooky action at a distance:
+    if module 'n' depends on 'm', that produces entries in m.deps.json.
+    When there is a dependency on a module that does not exist in the
+    build, it is stored with its first existing parent module. If no
+    such module exists, it is stored with the fake module FAKE_ROOT_MODULE.
+
+    This means that the validity of the fine-grained dependency caches
+    are a global property, so we store validity checking information for
+    fine-grained dependencies in a global cache file:
+     * We take a snapshot of current sources to later check consistency
+       between the fine-grained dependency cache and module cache metadata
+     * We store the mtime of all the dependency files to verify they
+       haven't changed
+    """
+    metastore = manager.metastore
+
+    error = False
+
+    fg_deps_meta = manager.fg_deps_meta.copy()
+
+    for id in rdeps:
+        if id != FAKE_ROOT_MODULE:
+            _, _, deps_json = get_cache_names(id, graph[id].xpath, manager.options)
+        else:
+            deps_json = DEPS_ROOT_FILE
+        assert deps_json
+        manager.log("Writing deps cache", deps_json)
+        if not manager.metastore.write(deps_json, deps_to_json(rdeps[id])):
+            manager.log(f"Error writing fine-grained deps JSON file {deps_json}")
+            error = True
+        else:
+            fg_deps_meta[id] = {"path": deps_json, "mtime": manager.getmtime(deps_json)}
+
+    meta_snapshot: dict[str, str] = {}
+    for id, st in graph.items():
+        # If we didn't parse a file (so it doesn't have a
+        # source_hash), then it must be a module with a fresh cache,
+        # so use the hash from that.
+        if st.source_hash:
+            hash = st.source_hash
+        else:
+            if st.meta:
+                hash = st.meta.hash
+            else:
+                hash = ""
+        meta_snapshot[id] = hash
+
+    meta = {"snapshot": meta_snapshot, "deps_meta": fg_deps_meta}
+
+    if not metastore.write(DEPS_META_FILE, json_dumps(meta)):
+        manager.log(f"Error writing fine-grained deps meta JSON file {DEPS_META_FILE}")
+        error = True
+
+    if error:
+        manager.errors.set_file(_cache_dir_prefix(manager.options), None, manager.options)
+        manager.error(None, "Error writing fine-grained dependencies cache", blocker=True)
+
+
+def invert_deps(deps: dict[str, set[str]], graph: Graph) -> dict[str, dict[str, set[str]]]:
+    """Splits fine-grained dependencies based on the module of the trigger.
+
+    Returns a dictionary from module ids to all dependencies on that
+    module. Dependencies not associated with a module in the build will be
+    associated with the nearest parent module that is in the build, or the
+    fake module FAKE_ROOT_MODULE if none are.
+    """
+    # Lazy import to speed up startup
+    from mypy.server.target import trigger_to_target
+
+    # Prepopulate the map for all the modules that have been processed,
+    # so that we always generate files for processed modules (even if
+    # there aren't any dependencies to them.)
+    rdeps: dict[str, dict[str, set[str]]] = {id: {} for id, st in graph.items() if st.tree}
+    for trigger, targets in deps.items():
+        module = module_prefix(graph, trigger_to_target(trigger))
+        if not module or not graph[module].tree:
+            module = FAKE_ROOT_MODULE
+
+        mod_rdeps = rdeps.setdefault(module, {})
+        mod_rdeps.setdefault(trigger, set()).update(targets)
+
+    return rdeps
+
+
+def generate_deps_for_cache(manager: BuildManager, graph: Graph) -> dict[str, dict[str, set[str]]]:
+    """Generate fine-grained dependencies into a form suitable for serializing.
+
+    This does a couple things:
+    1. Splits fine-grained deps based on the module of the trigger
+    2. For each module we generated fine-grained deps for, load any previous
+       deps and merge them in.
+
+    Returns a dictionary from module ids to all dependencies on that
+    module. Dependencies not associated with a module in the build will be
+    associated with the nearest parent module that is in the build, or the
+    fake module FAKE_ROOT_MODULE if none are.
+    """
+    from mypy.server.deps import merge_dependencies  # Lazy import to speed up startup
+
+    # Split the dependencies out into based on the module that is depended on.
+    rdeps = invert_deps(manager.fg_deps, graph)
+
+    # We can't just clobber existing dependency information, so we
+    # load the deps for every module we've generated new dependencies
+    # to and merge the new deps into them.
+    for module, mdeps in rdeps.items():
+        old_deps = manager.load_fine_grained_deps(module)
+        merge_dependencies(old_deps, mdeps)
+
+    return rdeps
+
+
+PLUGIN_SNAPSHOT_FILE: Final = "@plugins_snapshot.json"
+
+
+def write_plugins_snapshot(manager: BuildManager) -> None:
+    """Write snapshot of versions and hashes of currently active plugins."""
+    snapshot = json_dumps(manager.plugins_snapshot)
+    if (
+        not manager.metastore.write(PLUGIN_SNAPSHOT_FILE, snapshot)
+        and manager.options.cache_dir != os.devnull
+    ):
+        manager.errors.set_file(_cache_dir_prefix(manager.options), None, manager.options)
+        manager.error(None, "Error writing plugins snapshot", blocker=True)
+
+
+def read_plugins_snapshot(manager: BuildManager) -> dict[str, str] | None:
+    """Read cached snapshot of versions and hashes of plugins from previous run."""
+    snapshot = _load_json_file(
+        PLUGIN_SNAPSHOT_FILE,
+        manager,
+        log_success="Plugins snapshot (cached) ",
+        log_error="Could not load plugins snapshot: ",
+    )
+    if snapshot is None:
+        return None
+    if not isinstance(sna

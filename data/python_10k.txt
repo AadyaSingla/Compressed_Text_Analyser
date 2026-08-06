@@ -1,0 +1,315 @@
+"""Facilities to analyze entire programs, including imported modules.
+
+Parse and analyze the source files of a program in the correct order
+(based on file dependencies), and collect the results.
+
+This module only directs a build, which is performed in multiple passes per
+file.  The individual passes are implemented in separate modules.
+
+The function build() is the main interface to this module.
+"""
+
+# TODO: More consistent terminology, e.g. path/fnam, module/id, state/file
+
+from __future__ import annotations
+
+import collections
+import contextlib
+import gc
+import json
+import os
+import platform
+import re
+import stat
+import subprocess
+import sys
+import time
+import types
+from collections.abc import Callable, Iterator, Mapping, Sequence, Set as AbstractSet
+from concurrent.futures import ThreadPoolExecutor, wait
+from heapq import heappop, heappush
+from textwrap import dedent
+from threading import Lock, Thread
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    ClassVar,
+    Final,
+    NoReturn,
+    TextIO,
+    TypeAlias as _TypeAlias,
+    TypedDict,
+    cast,
+    final,
+)
+
+from librt.internal import (
+    cache_version,
+    read_bool,
+    read_int as read_int_bare,
+    read_str as read_str_bare,
+    read_tag,
+    write_bool,
+    write_bytes as write_bytes_bare,
+    write_int as write_int_bare,
+    write_str as write_str_bare,
+    write_tag,
+)
+
+import mypy.semanal_main
+from mypy.cache import (
+    CACHE_VERSION,
+    DICT_STR_GEN,
+    LIST_GEN,
+    LITERAL_NONE,
+    CacheMeta,
+    CacheMetaEx,
+    ErrorTuple,
+    JsonValue,
+    ReadBuffer,
+    Tag,
+    WriteBuffer,
+    read_bytes,
+    read_int,
+    read_int_list,
+    read_str,
+    read_str_list,
+    read_str_opt,
+    write_bytes,
+    write_int,
+    write_int_list,
+    write_json_value,
+    write_str,
+    write_str_list,
+    write_str_opt,
+)
+from mypy.checker import DeferredNode, TypeChecker
+from mypy.defaults import (
+    WORKER_CONNECTION_TIMEOUT,
+    WORKER_DONE_TIMEOUT,
+    WORKER_SHUTDOWN_TIMEOUT,
+    WORKER_START_INTERVAL,
+    WORKER_START_TIMEOUT,
+)
+from mypy.error_formatter import OUTPUT_CHOICES, ErrorFormatter
+from mypy.errorcodes import ErrorCode
+from mypy.errors import CompileError, ErrorInfo, Errors, report_internal_error
+from mypy.graph_utils import prepare_sccs, strongly_connected_components, topsort
+from mypy.indirection import TypeIndirectionVisitor
+from mypy.ipc import (
+    BadStatus,
+    IPCClient,
+    IPCException,
+    IPCMessage,
+    read_status,
+    ready_to_read,
+    receive,
+    send,
+)
+from mypy.messages import MessageBuilder
+from mypy.nodes import (
+    Decorator,
+    FileRawData,
+    FuncDef,
+    Import,
+    ImportAll,
+    ImportBase,
+    ImportFrom,
+    MypyFile,
+    OverloadedFuncDef,
+    SymbolTable,
+)
+from mypy.options import OPTIONS_AFFECTING_CACHE_NO_PLATFORM
+from mypy.partially_defined import PossiblyUndefinedVariableVisitor
+from mypy.semanal import SemanticAnalyzer
+from mypy.semanal_pass1 import SemanticAnalyzerPreAnalysis
+from mypy.util import (
+    DecodeError,
+    decode_python_encoding,
+    get_available_threads,
+    get_mypy_comments,
+    hash_digest,
+    hash_digest_bytes,
+    is_stub_package_file,
+    is_sub_path_normabs,
+    is_typeshed_file,
+    module_prefix,
+    os_path_join,
+    read_py_file,
+    time_ref,
+    time_spent_us,
+)
+
+if TYPE_CHECKING:
+    from mypy.report import Reports  # Avoid unconditional slow import
+
+from mypy import errorcodes as codes
+from mypy.config_parser import get_config_module_names, parse_mypy_comments
+from mypy.fixup import NodeFixer
+from mypy.freetree import free_tree
+from mypy.fscache import FileSystemCache
+from mypy.known_modules import get_known_modules, reset_known_modules_cache
+from mypy.messages import best_matches, pretty_seq
+from mypy.metastore import FilesystemMetadataStore, MetadataStore, SqliteMetadataStore
+from mypy.modulefinder import (
+    BuildSource as BuildSource,
+    BuildSourceSet as BuildSourceSet,
+    FindModuleCache,
+    ModuleNotFoundReason,
+    ModuleSearchResult,
+    SearchPaths,
+    compute_search_paths,
+)
+from mypy.modules_state import modules_state
+from mypy.nodes import Expression
+from mypy.options import Options
+from mypy.parse import load_from_raw, parse
+from mypy.plugin import ChainedPlugin, Plugin, ReportConfigContext
+from mypy.plugins.default import DefaultPlugin
+from mypy.renaming import LimitedVariableRenameVisitor, VariableRenameVisitor
+from mypy.stats import dump_type_stats
+from mypy.stubinfo import stub_distribution_name
+from mypy.types import Type, instance_cache
+from mypy.typestate import reset_global_state, type_state
+from mypy.util import json_dumps, json_loads
+from mypy.version import __version__
+
+# Switch to True to produce debug output related to fine-grained incremental
+# mode only that is useful during development. This produces only a subset of
+# output compared to --verbose output. We use a global flag to enable this so
+# that it's easy to enable this when running tests.
+DEBUG_FINE_GRAINED: Final = False
+
+# These modules are special and should always come from typeshed.
+CORE_BUILTIN_MODULES: Final = {
+    "builtins",
+    "typing",
+    "types",
+    "typing_extensions",
+    "mypy_extensions",
+    "_typeshed",
+    "_collections_abc",
+    "collections",
+    "collections.abc",
+    "sys",
+    "abc",
+}
+
+# We are careful now, we can increase this in future if safe/useful.
+MAX_GC_FREEZE_CYCLES: Final = 1
+
+# We store status of initial GC freeze as a global variable to avoid memory
+# leaks in tests, where we keep creating new BuildManagers in the same process.
+initial_gc_freeze_done = False
+
+Graph: _TypeAlias = dict[str, "State"]
+
+MODULE_RESOLUTION_URL: Final = (
+    "https://mypy.readthedocs.io/en/stable/running_mypy.html#mapping-file-paths-to-modules"
+)
+
+# Padding when estimating how much time it will take to process a file. This is to avoid
+# situations where 100 empty __init__.py files cost less than 1 trivial module.
+MIN_SIZE_HINT: Final = 256
+
+
+class SCC:
+    """A simple class that represents a strongly connected component (import cycle)."""
+
+    id_counter: ClassVar[int] = 0
+
+    def __init__(
+        self, ids: set[str], scc_id: int | None = None, deps: list[int] | None = None
+    ) -> None:
+        if scc_id is None:
+            self.id = SCC.id_counter
+            SCC.id_counter += 1
+        else:
+            self.id = scc_id
+        # Ids of modules in this cycle.
+        self.mod_ids = ids
+        # Direct dependencies, should be populated by the caller.
+        self.deps: set[int] = set(deps) if deps is not None else set()
+        # Count of direct dependencies that have not been processed yet.
+        # Populated by the caller from len(deps); decremented during graph
+        # processing as each dep completes. self.deps above stays constant.
+        self.not_ready_count: int = 0
+        # SCCs that (directly) depend on this SCC. Note this is a list to
+        # make processing order more predictable. Dependents will be notified
+        # that they may be ready in the order in this list.
+        self.direct_dependents: list[int] = []
+        # Rough estimate of how much time processing this SCC will take, this
+        # is used for more efficient scheduling across multiple build workers.
+        self.size_hint: int = MIN_SIZE_HINT
+
+
+# TODO: Get rid of BuildResult.  We might as well return a BuildManager.
+class BuildResult:
+    """The result of a successful build.
+
+    Attributes:
+      manager: The build manager.
+      files:   Dictionary from module name to related AST node.
+      types:   Dictionary from parse tree node to its inferred type.
+      used_cache: Whether the build took advantage of a pre-existing cache
+      errors:  List of error messages.
+    """
+
+    def __init__(self, manager: BuildManager, graph: Graph) -> None:
+        self.manager = manager
+        self.graph = graph
+        self.files = manager.modules
+        self.types = manager.all_types  # Non-empty if export_types True in options
+        self.used_cache = manager.cache_enabled
+        self.errors: list[str] = []  # Filled in by build if desired
+
+
+class WorkerClient:
+    """A simple class that represents a mypy build worker."""
+
+    conn: IPCClient
+
+    def __init__(self, status_file: str, options_data: str, env: Mapping[str, str]) -> None:
+        self.status_file = status_file
+        if os.path.isfile(status_file):
+            os.unlink(status_file)
+
+        command = [
+            sys.executable,
+            "-m",
+            "mypy.build_worker",
+            f"--status-file={status_file}",
+            f"--options-data={options_data}",
+        ]
+        # Return early without waiting, caller must call connect() before using the client.
+        self.proc = subprocess.Popen(command, env=env)
+        self.connected = False
+
+    def connect(self) -> None:
+        end_time = time.time() + WORKER_START_TIMEOUT
+        last_exception: Exception | None = None
+        while time.time() < end_time:
+            try:
+                data = read_status(self.status_file)
+            except BadStatus as exc:
+                last_exception = exc
+                time.sleep(WORKER_START_INTERVAL)
+                continue
+            try:
+                pid, connection_name = data["pid"], data["connection_name"]
+                assert isinstance(pid, int), f"Bad PID: {pid}"
+                assert isinstance(connection_name, str), f"Bad connection name: {connection_name}"
+                if sys.platform != "win32":
+                    # Windows uses "wrapper processes" to run Python, so we cannot
+                    # verify PIDs reliably.
+                    assert pid == self.proc.pid, f"PID mismatch: {pid} vs {self.proc.pid}"
+                self.conn = IPCClient(connection_name, WORKER_CONNECTION_TIMEOUT)
+                self.connected = True
+                return
+            except Exception as exc:
+                last_exception = exc
+                break
+        print(f"Failed to establish connection with worker: {last_exception}")
+
+    def close(self) -> None:
+        if s
