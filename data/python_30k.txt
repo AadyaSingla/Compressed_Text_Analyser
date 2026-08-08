@@ -1,0 +1,769 @@
+pshot, dict):
+        manager.log(f"Could not load plugins snapshot: cache is not a dict: {type(snapshot)}")  # type: ignore[unreachable]
+        return None
+    return snapshot
+
+
+def read_quickstart_file(
+    options: Options, stdout: TextIO
+) -> dict[str, tuple[float, int, str]] | None:
+    quickstart: dict[str, tuple[float, int, str]] | None = None
+    if options.quickstart_file:
+        # This is very "best effort". If the file is missing or malformed,
+        # just ignore it.
+        raw_quickstart: dict[str, Any] = {}
+        try:
+            with open(options.quickstart_file, "rb") as f:
+                raw_quickstart = json_loads(f.read())
+
+            quickstart = {}
+            for file, (x, y, z) in raw_quickstart.items():
+                quickstart[file] = (x, y, z)
+        except Exception as e:
+            print(f"Warning: Failed to load quickstart file: {str(e)}\n", file=stdout)
+    return quickstart
+
+
+def read_deps_cache(manager: BuildManager, graph: Graph) -> dict[str, FgDepMeta] | None:
+    """Read and validate the fine-grained dependencies cache.
+
+    See the write_deps_cache documentation for more information on
+    the details of the cache.
+
+    Returns None if the cache was invalid in some way.
+    """
+    deps_meta = _load_json_file(
+        DEPS_META_FILE,
+        manager,
+        log_success="Deps meta ",
+        log_error="Could not load fine-grained dependency metadata: ",
+    )
+    if deps_meta is None:
+        return None
+    meta_snapshot = deps_meta["snapshot"]
+    # Take a snapshot of the source hashes from all the metas we found.
+    # (Including the ones we rejected because they were out of date.)
+    # We use this to verify that they match up with the proto_deps.
+    current_meta_snapshot = {
+        id: st.meta_source_hash for id, st in graph.items() if st.meta_source_hash is not None
+    }
+
+    common = set(meta_snapshot.keys()) & set(current_meta_snapshot.keys())
+    if any(meta_snapshot[id] != current_meta_snapshot[id] for id in common):
+        # TODO: invalidate also if options changed (like --strict-optional)?
+        manager.log("Fine-grained dependencies cache inconsistent, ignoring")
+        return None
+
+    module_deps_metas = deps_meta["deps_meta"]
+    assert isinstance(module_deps_metas, dict)
+    if not manager.options.skip_cache_mtime_checks:
+        for meta in module_deps_metas.values():
+            try:
+                matched = manager.getmtime(meta["path"]) == meta["mtime"]
+            except FileNotFoundError:
+                matched = False
+            if not matched:
+                manager.log(f"Invalid or missing fine-grained deps cache: {meta['path']}")
+                return None
+
+    return module_deps_metas
+
+
+def _load_ff_file(
+    file: str, manager: BuildManager, log_error_fmt: str, id: str | None
+) -> bytes | None:
+    if manager.stats_enabled:
+        t0 = time.time()
+    try:
+        data = manager.metastore.read(file)
+    except OSError:
+        if manager.logging_enabled:
+            if id:
+                message = log_error_fmt.format(id) + file
+            else:
+                message = log_error_fmt + file
+            manager.log(message)
+        return None
+    if manager.stats_enabled:
+        manager.add_stats(metastore_read_time=time.time() - t0)
+    return data
+
+
+def _load_json_file(
+    file: str, manager: BuildManager, log_success: str, log_error: str
+) -> dict[str, Any] | None:
+    """A simple helper to read a JSON file with logging."""
+    t0 = time.time()
+    try:
+        data = manager.metastore.read(file)
+    except OSError:
+        manager.log(log_error + file)
+        return None
+    manager.add_stats(metastore_read_time=time.time() - t0)
+    # Only bother to compute the log message if we are logging it, since it could be big
+    if manager.verbosity() >= 2:
+        manager.trace(log_success + data.rstrip().decode())
+    try:
+        t1 = time.time()
+        result = json_loads(data)
+        manager.add_stats(data_file_load_time=time.time() - t1)
+    except json.JSONDecodeError:
+        manager.errors.set_file(file, None, manager.options)
+        manager.error(
+            None,
+            "Error reading JSON file;"
+            " you likely have a bad cache.\n"
+            "Try removing the {cache_dir} directory"
+            " and run mypy again.".format(cache_dir=manager.options.cache_dir),
+            blocker=True,
+        )
+        return None
+    else:
+        assert isinstance(result, dict)
+        return result
+
+
+def _cache_dir_prefix(options: Options) -> str:
+    """Get current cache directory (or file if id is given)."""
+    if options.bazel:
+        # This is needed so the cache map works.
+        return os.curdir
+    cache_dir = options.cache_dir
+    pyversion = options.python_version
+    base = os_path_join(cache_dir, "%d.%d" % pyversion)
+    return base
+
+
+def add_catch_all_gitignore(target_dir: str) -> None:
+    """Add catch-all .gitignore to an existing directory.
+
+    No-op if the .gitignore already exists.
+    """
+    gitignore = os_path_join(target_dir, ".gitignore")
+    try:
+        with open(gitignore, "x") as f:
+            print("# Automatically created by mypy", file=f)
+            print("*", file=f)
+    except FileExistsError:
+        pass
+
+
+def exclude_from_backups(target_dir: str) -> None:
+    """Exclude the directory from various archives and backups supporting CACHEDIR.TAG.
+
+    If the CACHEDIR.TAG file exists the function is a no-op.
+    """
+    cachedir_tag = os_path_join(target_dir, "CACHEDIR.TAG")
+    try:
+        with open(cachedir_tag, "x") as f:
+            f.write("""Signature: 8a477f597d28d172789f06886806bc55
+# This file is a cache directory tag automatically created by mypy.
+# For information about cache directory tags see https://bford.info/cachedir/
+""")
+    except FileExistsError:
+        pass
+
+
+def create_metastore(options: Options, parallel_worker: bool) -> MetadataStore:
+    """Create the appropriate metadata store."""
+    if options.sqlite_cache:
+        mds: MetadataStore = SqliteMetadataStore(
+            _cache_dir_prefix(options),
+            set_journal_mode=not parallel_worker,
+            num_shards=options.sqlite_num_shards,
+        )
+    else:
+        mds = FilesystemMetadataStore(_cache_dir_prefix(options))
+    return mds
+
+
+def get_meta_ex_name(meta_name: str) -> str:
+    # Convert e.g. foo.bar.meta.ff to foo.bar.meta_ex.ff
+    parts = meta_name.rsplit(".", maxsplit=2)
+    parts[1] = "meta_ex"
+    return ".".join(parts)
+
+
+def get_cache_names(id: str, path: str, options: Options) -> tuple[str, str, str | None]:
+    """Return the file names for the cache files.
+
+    Args:
+      id: module ID
+      path: module path
+      options: build options
+
+    Returns:
+      A tuple with the file names to be used for the meta file, the
+      data file, and the fine-grained deps JSON, respectively.
+    """
+    if options.cache_map:
+        pair = options.cache_map.get(normpath(path, options))
+    else:
+        pair = None
+    if pair is not None:
+        # The cache map paths were specified relative to the base directory,
+        # but the filesystem metastore APIs operates relative to the cache
+        # prefix directory.
+        # Solve this by rewriting the paths as relative to the root dir.
+        # This only makes sense when using the filesystem backed cache.
+        root = _cache_dir_prefix(options)
+        return os.path.relpath(pair[0], root), os.path.relpath(pair[1], root), None
+    prefix = os.path.join(*id.split("."))
+    is_package = os.path.basename(path).startswith("__init__.py")
+    if is_package:
+        prefix = os_path_join(prefix, "__init__")
+
+    deps_json = None
+    if options.cache_fine_grained:
+        deps_json = prefix + ".deps.json"
+    if options.fixed_format_cache:
+        data_suffix = ".data.ff"
+        meta_suffix = ".meta.ff"
+    else:
+        data_suffix = ".data.json"
+        meta_suffix = ".meta.json"
+    return prefix + meta_suffix, prefix + data_suffix, deps_json
+
+
+def options_snapshot(module: str, manager: BuildManager) -> dict[str, object]:
+    """Make compact snapshot of options for a module.
+
+    Separately store only the options we may compare individually, and take a hash
+    of everything else. If --debug-cache is specified, fall back to full snapshot.
+    """
+    cloned = manager.options.clone_for_module(module)
+    if manager.options.debug_cache:
+        # Build full options snapshot for debugging purposes.
+        platform_opt, values = cloned.select_options_affecting_cache()
+        result: dict[str, object] = {"platform": platform_opt}
+        for key, val in zip(OPTIONS_AFFECTING_CACHE_NO_PLATFORM, values):
+            result[key] = val
+        return result
+    cache = manager.options_snapshot_cache
+    cached = cache.get(cloned)
+    if cached is None:
+        platform_opt, values = cloned.select_options_affecting_cache()
+        buf = WriteBuffer()
+        write_json_value(buf, cast(JsonValue, values))
+        cached = (platform_opt, hash_digest(buf.getvalue()))
+        cache[cloned] = cached
+    return {"platform": cached[0], "other_options": cached[1]}
+
+
+def find_cache_meta(
+    id: str, path: str, manager: BuildManager, skip_validation: bool = False
+) -> tuple[CacheMeta, CacheMetaEx] | None:
+    """Find cache data for a module.
+
+    Args:
+      id: module ID
+      path: module path
+      manager: the build manager (for pyversion, log/trace, and build options)
+      skip_validation: if True skip any validation steps (used for parallel checking)
+
+    Returns:
+      A CacheMeta/CacheMetaEx instance pair if the cache data was found and appears
+      valid; otherwise None.
+    """
+    # TODO: May need to take more build options into account
+    meta_file, data_file, _ = get_cache_names(id, path, manager.options)
+    if manager.tracing_enabled:
+        manager.trace(f"Looking for {id} at {meta_file}")
+    if manager.stats_enabled:
+        t0 = time.time()
+    if manager.options.fixed_format_cache:
+        meta = _load_ff_file(
+            meta_file, manager, log_error_fmt="Could not load cache for {}: ", id=id
+        )
+    else:
+        meta = _load_json_file(
+            meta_file,
+            manager,
+            log_success=f"Meta {id} ",
+            log_error=f"Could not load cache for {id}: ",
+        )
+    if meta is None:
+        return None
+    if manager.stats_enabled:
+        t1 = time.time()
+    if isinstance(meta, bytes):
+        # If either low-level buffer format or high-level cache layout changed, we
+        # cannot use the cache files, even with --skip-version-check.
+        # TODO: switch to something like librt.internal.read_byte() if this is slow.
+        if meta[0] != cache_version() or meta[1] != CACHE_VERSION:
+            manager.log(f"Metadata abandoned for {id}: incompatible cache format")
+            return None
+        data_io = ReadBuffer(meta[2:])
+        m = CacheMeta.read(data_io, data_file)
+    else:
+        m = CacheMeta.deserialize(meta, data_file)
+    if m is None:
+        manager.log(f"Metadata abandoned for {id}: cannot deserialize data")
+        return None
+    if manager.stats_enabled:
+        t2 = time.time()
+        manager.add_stats(
+            load_meta_time=t2 - t0, load_meta_load_time=t1 - t0, load_meta_from_dict_time=t2 - t1
+        )
+    if skip_validation:
+        # If the caller requested no validation, skip the implementation part of the meta
+        # as well, as a performance optimization. Note: this may return an incomplete meta,
+        # only use if you know what you are doing.
+        assert manager.parallel_worker
+        return m, CacheMetaEx([], [], [], [])
+
+    # Ignore cache if generated by an older mypy version.
+    if m.version_id != manager.version_id and not manager.options.skip_version_check:
+        manager.log(f"Metadata abandoned for {id}: different mypy version")
+        return None
+
+    total_deps = len(m.dependencies) + len(m.suppressed)
+    if len(m.dep_prios) != total_deps or len(m.dep_lines) != total_deps:
+        manager.log(f"Metadata abandoned for {id}: broken dependencies")
+        return None
+
+    # Ignore cache if (relevant) options aren't the same.
+    # Note that it's fine to mutilate cached_options since it's only used here.
+    cached_options = m.options
+    current_options = options_snapshot(id, manager)
+    if manager.options.skip_version_check:
+        # When we're lax about version we're also lax about platform.
+        cached_options["platform"] = current_options["platform"]
+    if "debug_cache" in cached_options:
+        # Older versions included debug_cache, but it's silly to compare it.
+        del cached_options["debug_cache"]
+    if cached_options != current_options:
+        manager.log(f"Metadata abandoned for {id}: options differ")
+        if manager.options.verbosity >= 2:
+            for key in sorted(set(cached_options) | set(current_options)):
+                if cached_options.get(key) != current_options.get(key):
+                    manager.trace(
+                        "    {}: {} != {}".format(
+                            key, cached_options.get(key), current_options.get(key)
+                        )
+                    )
+        return None
+    if manager.old_plugins_snapshot and manager.plugins_snapshot:
+        # Check if plugins are still the same.
+        if manager.plugins_snapshot != manager.old_plugins_snapshot:
+            manager.log(f"Metadata abandoned for {id}: plugins differ")
+            return None
+    plugin_data = manager.plugin.report_config_data(ReportConfigContext(id, path, is_check=True))
+    if not manager.options.fixed_format_cache:
+        # So that plugins can return data with tuples in it without
+        # things silently always invalidating modules, we round-trip
+        # the config data. This isn't beautiful.
+        plugin_data = json_loads(json_dumps(plugin_data))
+    if m.plugin_data != plugin_data:
+        manager.log(f"Metadata abandoned for {id}: plugin configuration differs")
+        return None
+
+    meta_ex_file = get_meta_ex_name(meta_file)
+    if manager.options.fixed_format_cache:
+        meta_ex = _load_ff_file(
+            meta_ex_file, manager, log_error_fmt="Could not load meta_ex for {}: ", id=id
+        )
+    else:
+        meta_ex = _load_json_file(
+            meta_ex_file,
+            manager,
+            log_success=f"Meta_ex {id} ",
+            log_error=f"Could not load meta_ex for {id}: ",
+        )
+    if meta_ex is None:
+        return None
+    if isinstance(meta_ex, bytes):
+        data_io = ReadBuffer(meta_ex)
+        me = CacheMetaEx.read(data_io)
+    else:
+        me = CacheMetaEx.deserialize(meta_ex)
+    if me is None:
+        return None
+    manager.add_stats(fresh_metas=1)
+    return m, me
+
+
+def validate_meta(
+    meta: CacheMeta | None, id: str, path: str | None, ignore_all: bool, manager: BuildManager
+) -> CacheMeta | None:
+    """Checks whether the cached AST of this module can be used.
+
+    Returns:
+      None, if the cached AST is unusable.
+      Original meta, if mtime/size matched.
+      Meta with mtime updated to match source file, if hash/size matched but mtime/path didn't.
+    """
+    # This requires two steps. The first one is obvious: we check that the module source file
+    # contents is the same as it was when the cache data file was created. The second one is not
+    # too obvious: we check that the cache data file mtime has not changed; it is needed because
+    # we use cache data file mtime to propagate information about changes in the dependencies.
+
+    if meta is None:
+        manager.log(f"Metadata not found for {id}")
+        return None
+
+    if meta.ignore_all and not ignore_all:
+        manager.log(f"Metadata abandoned for {id}: errors were previously ignored")
+        return None
+
+    if manager.stats_enabled:
+        t0 = time.time()
+    bazel = manager.options.bazel
+    assert path is not None, "Internal error: meta was provided without a path"
+    if not manager.options.skip_cache_mtime_checks:
+        # Check data_file; assume if its mtime matches it's good.
+        try:
+            data_mtime = manager.getmtime(meta.data_file)
+        except OSError:
+            manager.log(f"Metadata abandoned for {id}: failed to stat data_file")
+            return None
+        if data_mtime != meta.data_mtime:
+            manager.log(f"Metadata abandoned for {id}: data cache is modified")
+            return None
+
+    if bazel:
+        # Normalize path under bazel to make sure it isn't absolute
+        path = normpath(path, manager.options)
+
+    st = manager.get_stat(path)
+    if st is None:
+        return None
+    if not stat.S_ISDIR(st.st_mode) and not stat.S_ISREG(st.st_mode):
+        manager.log(f"Metadata abandoned for {id}: file or directory {path} does not exist")
+        return None
+
+    if manager.stats_enabled:
+        manager.add_stats(validate_stat_time=time.time() - t0)
+
+    # When we are using a fine-grained cache, we want our initial
+    # build() to load all of the cache information and then do a
+    # fine-grained incremental update to catch anything that has
+    # changed since the cache was generated. We *don't* want to do a
+    # coarse-grained incremental rebuild, so we accept the cache
+    # metadata even if it doesn't match the source file.
+    #
+    # We still *do* the mtime/hash checks, however, to enable
+    # fine-grained mode to take advantage of the mtime-updating
+    # optimization when mtimes differ but hashes match.  There is
+    # essentially no extra time cost to computing the hash here, since
+    # it will be cached and will be needed for finding changed files
+    # later anyways.
+    fine_grained_cache = manager.use_fine_grained_cache()
+
+    size = st.st_size
+    # Bazel ensures the cache is valid.
+    if size != meta.size and not bazel and not fine_grained_cache:
+        manager.log(f"Metadata abandoned for {id}: file {path} has different size")
+        return None
+
+    # Bazel ensures the cache is valid.
+    mtime = 0 if bazel else int(st.st_mtime)
+    if not bazel and (mtime != meta.mtime or path != meta.path):
+        if manager.quickstart_state and path in manager.quickstart_state:
+            # If the mtime and the size of the file recorded in the quickstart dump matches
+            # what we see on disk, we know (assume) that the hash matches the quickstart
+            # data as well. If that hash matches the hash in the metadata, then we know
+            # the file is up to date even though the mtime is wrong, without needing to hash it.
+            qmtime, qsize, qhash = manager.quickstart_state[path]
+            if int(qmtime) == mtime and qsize == size and qhash == meta.hash:
+                manager.log(f"Metadata fresh (by quickstart) for {id}: file {path}")
+                meta.mtime = mtime
+                meta.path = path
+                return meta
+
+        t0 = time.time()
+        try:
+            # dir means it is a namespace package
+            if stat.S_ISDIR(st.st_mode):
+                source_hash = ""
+            else:
+                source_hash = manager.fscache.hash_digest(path)
+        except (OSError, UnicodeDecodeError, DecodeError):
+            return None
+        manager.add_stats(validate_hash_time=time.time() - t0)
+        if source_hash != meta.hash:
+            if fine_grained_cache:
+                manager.log(f"Using stale metadata for {id}: file {path}")
+                return meta
+            else:
+                manager.log(f"Metadata abandoned for {id}: file {path} has different hash")
+                return None
+        else:
+            if manager.stats_enabled:
+                t0 = time.time()
+            # Optimization: update mtime and path (otherwise, this mismatch will reappear).
+            meta.mtime = mtime
+            meta.path = path
+            meta.size = size
+            meta.options = options_snapshot(id, manager)
+            meta_file, _, _ = get_cache_names(id, path, manager.options)
+            if manager.logging_enabled:
+                manager.log(
+                    "Updating mtime for {}: file {}, meta {}, mtime {}".format(
+                        id, path, meta_file, meta.mtime
+                    )
+                )
+            write_cache_meta(meta, manager, meta_file)
+            if manager.stats_enabled:
+                t1 = time.time()
+                manager.add_stats(
+                    validate_update_time=time.time() - t1, validate_munging_time=t1 - t0
+                )
+            return meta
+
+    # It's a match on (id, path, size, hash, mtime).
+    if manager.logging_enabled:
+        manager.log(f"Metadata fresh for {id}: file {path}")
+    return meta
+
+
+def compute_hash(text: str) -> str:
+    # We use a crypto hash instead of the builtin hash(...) function
+    # because the output of hash(...)  can differ between runs due to
+    # hash randomization (enabled by default in Python 3.3).  See the
+    # note in
+    # https://docs.python.org/3/reference/datamodel.html#object.__hash__.
+    return hash_digest(text.encode("utf-8"))
+
+
+def write_cache(
+    id: str,
+    path: str,
+    tree: MypyFile,
+    dependencies: list[str],
+    suppressed: list[str],
+    suppressed_deps_opts: bytes,
+    imports_ignored: dict[int, list[str]],
+    dep_prios: list[int],
+    dep_lines: list[int],
+    old_interface_hash: bytes,
+    trans_dep_hash: bytes,
+    source_hash: str,
+    ignore_all: bool,
+    manager: BuildManager,
+) -> tuple[bytes, tuple[CacheMeta, str] | None]:
+    """Write cache files for a module.
+
+    Note that this mypy's behavior is still correct when any given
+    write_cache() call is replaced with a no-op, so error handling
+    code that bails without writing anything is okay.
+
+    Args:
+      id: module ID
+      path: module path
+      tree: the fully checked module data
+      dependencies: module IDs on which this module depends
+      suppressed: module IDs which were suppressed as dependencies
+      dep_prios: priorities (parallel array to dependencies)
+      dep_lines: import line locations (parallel array to dependencies)
+      old_interface_hash: the hash from the previous version of the data cache file
+      source_hash: the hash of the source code
+      ignore_all: the ignore_all flag for this module
+      manager: the build manager (for pyversion, log/trace)
+
+    Returns:
+      A tuple containing the interface hash and inner tuple with CacheMeta
+      that should be written and path to cache file (inner tuple may be None,
+      if the cache data could not be written).
+    """
+    metastore = manager.metastore
+    # For Bazel we use relative paths and zero mtimes.
+    bazel = manager.options.bazel
+
+    # Obtain file paths.
+    meta_file, data_file, _ = get_cache_names(id, path, manager.options)
+    manager.log(f"Writing {id} {path} {meta_file} {data_file}")
+
+    # Update tree.path so that in bazel mode it's made relative (since
+    # sometimes paths leak out).
+    if bazel:
+        tree.path = path
+
+    plugin_data = manager.plugin.report_config_data(ReportConfigContext(id, path, is_check=False))
+
+    # Serialize data and analyze interface
+    if manager.options.fixed_format_cache:
+        data_io = WriteBuffer()
+        tree.write(data_io)
+        data_bytes = data_io.getvalue()
+    else:
+        data = tree.serialize()
+        data_bytes = json_dumps(data, manager.options.debug_cache)
+    interface_hash = hash_digest_bytes(data_bytes + json_dumps(plugin_data))
+
+    # Obtain and set up metadata
+    st = manager.get_stat(path)
+    if st is None:
+        manager.log(f"Cannot get stat for {path}")
+        # Remove apparently-invalid cache files.
+        # (This is purely an optimization.)
+        for filename in [data_file, meta_file]:
+            try:
+                os.remove(filename)
+            except OSError:
+                pass
+        # Still return the interface hash we computed.
+        return interface_hash, None
+
+    # Write data cache file, if applicable
+    # Note that for Bazel we don't record the data file's mtime.
+    if old_interface_hash == interface_hash:
+        manager.trace(f"Interface for {id} is unchanged")
+    else:
+        manager.trace(f"Interface for {id} has changed")
+        if not metastore.write(data_file, data_bytes):
+            # Most likely the error is the replace() call
+            # (see https://github.com/python/mypy/issues/3215).
+            manager.log(f"Error writing cache data file {data_file}")
+            # Let's continue without writing the meta file.  Analysis:
+            # If the replace failed, we've changed nothing except left
+            # behind an extraneous temporary file; if the replace
+            # worked but the getmtime() call failed, the meta file
+            # will be considered invalid on the next run because the
+            # data_mtime field won't match the data file's mtime.
+            # Both have the effect of slowing down the next run a
+            # little bit due to an out-of-date cache file.
+            return interface_hash, None
+
+    try:
+        data_mtime = manager.getmtime(data_file)
+    except OSError:
+        manager.log(f"Error in os.stat({data_file!r}), skipping cache write")
+        return interface_hash, None
+
+    mtime = 0 if bazel else int(st.st_mtime)
+    size = st.st_size
+    # Note that the options we store in the cache are the options as
+    # specified by the command line/config file and *don't* reflect
+    # updates made by inline config directives in the file. This is
+    # important, or otherwise the options would never match when
+    # verifying the cache.
+    assert source_hash is not None
+    meta = CacheMeta(
+        id=id,
+        path=path,
+        mtime=mtime,
+        size=size,
+        hash=source_hash,
+        dependencies=dependencies,
+        data_mtime=data_mtime,
+        data_file=data_file,
+        suppressed=suppressed,
+        imports_ignored=imports_ignored,
+        options=options_snapshot(id, manager),
+        suppressed_deps_opts=suppressed_deps_opts,
+        dep_prios=dep_prios,
+        dep_lines=dep_lines,
+        interface_hash=interface_hash,
+        trans_dep_hash=trans_dep_hash,
+        version_id=manager.version_id,
+        ignore_all=ignore_all,
+        plugin_data=plugin_data,
+        # This one will be filled by the caller.
+        dep_hashes=[],
+    )
+    return interface_hash, (meta, meta_file)
+
+
+def write_cache_meta(meta: CacheMeta, manager: BuildManager, meta_file: str) -> None:
+    # Write meta cache file
+    metastore = manager.metastore
+    if manager.options.fixed_format_cache:
+        data_io = WriteBuffer()
+        meta.write(data_io)
+        # Prefix with both low- and high-level cache format versions for future validation.
+        # TODO: switch to something like librt.internal.write_byte() if this is slow.
+        meta_bytes = bytes([cache_version(), CACHE_VERSION]) + data_io.getvalue()
+    else:
+        meta_dict = meta.serialize()
+        meta_bytes = json_dumps(meta_dict, manager.options.debug_cache)
+    if not metastore.write(meta_file, meta_bytes):
+        # Most likely the error is the replace() call
+        # (see https://github.com/python/mypy/issues/3215).
+        # The next run will simply find the cache entry out of date.
+        manager.log(f"Error writing cache meta file {meta_file}")
+
+
+def write_cache_meta_ex(meta_file: str, meta_ex: CacheMetaEx, manager: BuildManager) -> None:
+    # Write errors cache file
+    meta_ex_file = get_meta_ex_name(meta_file)
+    metastore = manager.metastore
+    if manager.options.fixed_format_cache:
+        data_io = WriteBuffer()
+        meta_ex.write(data_io)
+        meta_bytes = data_io.getvalue()
+    else:
+        # Some generic JSON helpers require top-level to be a dict.
+        meta_bytes = json_dumps(meta_ex.serialize(), manager.options.debug_cache)
+    if not metastore.write(meta_ex_file, meta_bytes):
+        manager.log(f"Error writing meta_ex file {meta_ex_file}")
+
+
+"""Dependency manager.
+
+Design
+======
+
+Ideally
+-------
+
+A. Collapse cycles (each SCC -- strongly connected component --
+   becomes one "supernode").
+
+B. Topologically sort nodes based on dependencies.
+
+C. Process from leaves towards roots.
+
+Wrinkles
+--------
+
+a. Need to parse source modules to determine dependencies.
+
+b. Processing order for modules within an SCC.
+
+c. Must order mtimes of files to decide whether to re-process; depends
+   on clock never resetting.
+
+d. from P import M; checks filesystem whether module P.M exists in
+   filesystem.
+
+e. Race conditions, where somebody modifies a file while we're
+   processing. Solved by using a FileSystemCache.
+
+
+Steps
+-----
+
+1. For each explicitly given module find the source file location.
+
+2. For each such module load and check the cache metadata, and decide
+   whether it's valid.
+
+3. Now recursively (or iteratively) find dependencies and add those to
+   the graph:
+
+   - for cached nodes use the list of dependencies from the cache
+     metadata (this will be valid even if we later end up re-parsing
+     the same source);
+
+   - for uncached nodes parse the file and process all imports found,
+     taking care of (a) above.
+
+Step 3 should also address (d) above.
+
+Once step 3 terminates we have the entire dependency graph, and for
+each module we've either loaded the cache metadata or parsed the
+source code.  (However, we may still need to parse those modules for
+which we have cache metadata but that depend, directly or indirectly,
+on at least one module for which the cache metadata is stale.)
+
+Now we can execute steps A-C from the first section.  Finding SCCs for
+step A shouldn't be hard; there's a recipe here:
+https://code.activestate.com/recipes/578507/.  There's also a plethora
+of topsort recipes, e.g. https://code.activestate.com/recipes/577413/.
+
+For single nodes, processing is simple.  If the node was cached, we
+deserialize the cache data and fix up cross-references.  Otherwise, we
+do semantic analysis followed by type checking.  Once we (re-)processed
+an SCC we check whether its interface (symbol table) is still fresh
+(matches previous cached value

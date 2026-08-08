@@ -7,6 +7,74 @@ project evolves.)
 
 ---
 
+## 2026-08-08 — Save PDF on every graph, a saved-figures page, and samples up to 40k
+
+- **Why**: the graphs were only ever pixels in a browser tab. Getting one
+  into the thesis meant screenshotting it, which produces a fixed-resolution
+  raster that goes soft the moment it's scaled or printed. Every plot route
+  now has a **Save PDF** sibling that writes the same figure as a vector PDF
+  into `figures/`, so a figure can be dropped into a document at any size and
+  stay sharp.
+
+- **Split "build the figure" from "send the figure."** `plot()` and the two
+  `/analysis/*.png` routes used to build a figure and stream it as PNG in one
+  function. They're now `_build_results_figure()` / `_build_analysis_figure()`
+  plus one of two sinks: `_serve_png(fig)` (stream from `io.BytesIO`) or
+  `_save_pdf(fig, stem)` (write to `FIGURE_DIR`). The point of the split is
+  that the PNG and the PDF can't drift — there's one definition of each graph
+  and two ways to emit it, not two near-identical plotting bodies to keep in
+  sync. Both sinks `plt.close()`, so the existing no-leaked-figures rule holds
+  by construction: every route ends in exactly one of them.
+
+- **The two cross-file plots' arguments moved into an `ANALYSIS_PLOTS` dict**
+  keyed `"elbow"` / `"captured"`. There were two routes over one helper before;
+  adding Save PDF would have made it four routes repeating the same three
+  literal arguments. Now the URL segment *is* the key (`POST
+  /save/analysis/<name>`), and a third cross-file plot would be one dict entry
+  plus one PNG route.
+
+- **Stable filenames, so re-saving replaces.** `analysis_elbow.pdf`,
+  `analysis_captured.pdf`, and `results_<label>_<hash8>.pdf`. The alternative
+  — timestamped names — accumulates six near-identical PDFs of the same graph
+  after a few re-runs and leaves you picking the newest by eye; overwriting
+  means a figure referenced from a document keeps its path and just gets
+  fresher. The hash fragment is in the per-input name because labels are *not*
+  unique (two uploads can share a filename), and `_safe_stem()` reduces the
+  label to `[A-Za-z0-9_-]` first since it comes from a sample name or an
+  uploaded filename.
+
+- **`/figures` browse page + `_figure_path()`'s double check.** The page lists
+  saved PDFs newest-first with size and save time, each linking to the file,
+  each with a delete button. `name` comes from the URL on both the serve and
+  delete routes, so it goes through one gatekeeper that checks it twice: a
+  `[A-Za-z0-9_.-]+\.pdf` full-match (no separators, no `..` segments), then a
+  resolved-parent comparison against `FIGURE_DIR`. Two checks because neither
+  covers the other — the pattern can't see a symlink pointing out of the
+  folder, and the resolve alone would still admit odd names. Anything failing
+  either 404s before the filesystem is touched.
+
+- **`figures/` is tracked in git** (with a `.gitkeep`), unlike `data/uploads/`
+  and `experiments.db` which are gitignored. The distinction is
+  regenerable-input vs. kept-output: an upload can be re-uploaded, a saved
+  figure is the artefact being produced.
+
+- **Samples extended to 30k, 35k, and 40k** — `SAMPLE_SIZES` grew by three
+  entries and six new slices were cut, same non-overlapping-consecutive rule
+  as the existing ones, so a category still varies only in size. Four points
+  per category was thin for reading a trend off the elbow-vs-size plot;
+  seven gives the line something to be.
+
+- **`_sample_names()` replaces `sorted(SAMPLES)` for the dropdown.** Plain
+  string sorting happens to read correctly while every size is two digits, but
+  it sorts `english_5k` after `english_35k` — a latent bug that the 30k–40k
+  additions didn't trigger and a future 5k would. It now sorts on (category,
+  the integer parsed out of the suffix).
+
+- **No schema or migration impact**: no database columns changed, and saved
+  figures live on the filesystem rather than in SQLite — a figure is a
+  rendering of data already stored, so there's nothing to keep consistent
+  beyond re-clicking Save after a re-run.
+
 ## 2026-08-05 — Files only: paste removed, buttons renamed, Analysis button added
 
 - **Paste is gone; upload and sample are the only two inputs.** Requested

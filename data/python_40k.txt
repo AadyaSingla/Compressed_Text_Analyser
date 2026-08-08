@@ -1,0 +1,953 @@
+= SemanticAnalyzerPreAnalysis()
+            with self.wrap_context():
+                analyzer.visit_file(self.tree, self.xpath, self.id, options)
+        # TODO: Do this while constructing the AST?
+        self.tree.names = SymbolTable()
+        if not self.tree.is_stub:
+            if not self.options.allow_redefinition:
+                # Perform some low-key variable renaming when assignments can't
+                # widen inferred types
+                self.tree.accept(LimitedVariableRenameVisitor())
+            if options.allow_redefinition_old:
+                # Perform more renaming across the AST to allow variable redefinitions
+                self.tree.accept(VariableRenameVisitor())
+        self.time_spent_us += time_spent_us(t0)
+
+    def add_dependency(self, dep: str) -> None:
+        if dep not in self.dependencies_set:
+            self.dependencies.append(dep)
+            self.dependencies_set.add(dep)
+        if dep in self.suppressed_set:
+            self.suppressed.remove(dep)
+            self.suppressed_set.remove(dep)
+
+    def suppress_dependency(self, dep: str) -> None:
+        if dep in self.dependencies_set:
+            self.dependencies.remove(dep)
+            self.dependencies_set.remove(dep)
+        if dep not in self.suppressed_set:
+            self.suppressed.append(dep)
+            self.suppressed_set.add(dep)
+
+    def compute_dependencies(self) -> None:
+        """Compute a module's dependencies after parsing it.
+
+        This is used when we parse a file that we didn't have
+        up-to-date cache information for. When we have an up-to-date
+        cache, we just use the cached info.
+        """
+        manager = self.manager
+        assert self.tree is not None
+
+        # Compute (direct) dependencies.
+        # Add all direct imports (this is why we needed the first pass).
+        # Also keep track of each dependency's source line.
+        # Missing dependencies will be moved from dependencies to
+        # suppressed when they fail to be loaded in load_graph.
+
+        self.dependencies = []
+        self.dependencies_set = set()
+        self.suppressed = []
+        self.suppressed_set = set()
+        self.priorities = {}  # id -> priority
+        self.dep_line_map = {}  # id -> line
+        self.dep_hashes = {}
+        # We copy imports as defs to (partially) support some legacy mypy plugins,
+        # most notably old NumPy plugin that does some imports patching, see #21323.
+        copied_imports = False
+        if not self.tree.defs and self.tree.raw_data is not None:
+            self.tree.defs = list(self.tree.imports)
+            copied_imports = True
+        dep_entries = manager.all_imported_modules_in_file(
+            self.tree
+        ) + self.manager.plugin.get_additional_deps(self.tree)
+        if copied_imports:
+            self.tree.defs = []
+        for pri, id, line in dep_entries:
+            self.priorities[id] = min(pri, self.priorities.get(id, PRI_ALL))
+            if id == self.id:
+                continue
+            self.add_dependency(id)
+            if id not in self.dep_line_map:
+                self.dep_line_map[id] = line
+        import_lines = self.dep_line_map.values()
+        self.imports_ignored = {
+            line: codes for line, codes in self.tree.ignored_lines.items() if line in import_lines
+        }
+        # Every module implicitly depends on builtins.
+        if self.id != "builtins":
+            self.add_dependency("builtins")
+        if self.tree.uses_template_strings:
+            self.add_dependency("string.templatelib")
+
+        self.check_blockers()  # Can fail due to bogus relative imports
+
+    def type_check_first_pass(self, recurse_into_functions: bool = True) -> None:
+        if self.options.semantic_analysis_only:
+            return
+        t0 = time_ref()
+        with self.wrap_context():
+            self.type_checker().check_first_pass(recurse_into_functions=recurse_into_functions)
+        self.time_spent_us += time_spent_us(t0)
+
+    def type_checker(self) -> TypeChecker:
+        if not self._type_checker:
+            assert self.tree is not None, "Internal error: must be called on parsed file only"
+            manager = self.manager
+            self._type_checker = TypeChecker(
+                manager.errors,
+                manager.modules,
+                self.options,
+                self.tree,
+                self.xpath,
+                manager.plugin,
+                self.per_line_checking_time_ns,
+            )
+        return self._type_checker
+
+    def type_map(self) -> dict[Expression, Type]:
+        # We can extract the master type map directly since at this
+        # point no temporary type maps can be active.
+        assert len(self.type_checker()._type_maps) == 1
+        return self.type_checker()._type_maps[0]
+
+    def type_check_second_pass(
+        self,
+        todo: Sequence[DeferredNode] | None = None,
+        recurse_into_functions: bool = True,
+        impl_only: bool = False,
+    ) -> bool:
+        if self.options.semantic_analysis_only:
+            return False
+        t0 = time_ref()
+        with self.wrap_context():
+            result = self.type_checker().check_second_pass(
+                todo=todo, recurse_into_functions=recurse_into_functions, impl_only=impl_only
+            )
+        self.time_spent_us += time_spent_us(t0)
+        return result
+
+    def detect_possibly_undefined_vars(self) -> None:
+        assert self.tree is not None, "Internal error: method must be called on parsed file only"
+        if self.tree.is_stub:
+            # We skip stub files because they aren't actually executed.
+            return
+        manager = self.manager
+        manager.errors.set_file(self.xpath, self.tree.fullname, options=self.options)
+        if manager.errors.is_error_code_enabled(
+            codes.POSSIBLY_UNDEFINED
+        ) or manager.errors.is_error_code_enabled(codes.USED_BEFORE_DEF):
+            with self.wrap_context():
+                self.tree.accept(
+                    PossiblyUndefinedVariableVisitor(
+                        MessageBuilder(manager.errors, manager.modules),
+                        self.type_map(),
+                        self.options,
+                        self.tree.names,
+                    )
+                )
+
+    def finish_passes(self) -> None:
+        assert self.tree is not None, "Internal error: method must be called on parsed file only"
+        manager = self.manager
+        if self.options.semantic_analysis_only:
+            return
+        t0 = time_ref()
+        with self.wrap_context():
+            # Some tests (and tools) want to look at the set of all types.
+            options = manager.options
+            if options.export_types:
+                manager.all_types.update(self.type_map())
+
+            # We should always patch indirect dependencies, even in full (non-incremental) builds,
+            # because the cache still may be written, and it must be correct.
+            self.patch_indirect_dependencies(
+                # Two possible sources of indirect dependencies:
+                # * Symbols not directly imported in this module but accessed via an attribute
+                #   or via a re-export (vast majority of these recorded in semantic analysis).
+                # * For each expression type we need to record definitions of type components
+                #   since "meaning" of the type may be updated when definitions are updated.
+                self.tree.module_refs | self.type_checker().module_refs,
+                set(self.type_map().values()),
+            )
+
+            if self.options.dump_inference_stats:
+                dump_type_stats(
+                    self.tree,
+                    self.xpath,
+                    modules=self.manager.modules,
+                    inferred=True,
+                    typemap=self.type_map(),
+                )
+            manager.report_file(self.tree, self.type_map(), self.options)
+
+            self.update_fine_grained_deps(self.manager.fg_deps)
+
+            if manager.options.export_ref_info:
+                write_undocumented_ref_info(
+                    self, manager.metastore, manager.options, self.type_map()
+                )
+
+            self.free_state()
+            if not manager.options.fine_grained_incremental and not manager.options.preserve_asts:
+                free_tree(self.tree)
+                self.tree.defs.clear()
+        self.time_spent_us += time_spent_us(t0)
+
+    def free_state(self) -> None:
+        if self._type_checker:
+            self._type_checker.reset()
+            self._type_checker = None
+
+    def patch_indirect_dependencies(self, module_refs: set[str], types: set[Type]) -> None:
+        assert self.ancestors is not None
+        existing_deps = set(self.dependencies + self.suppressed + self.ancestors)
+        existing_deps.add(self.id)
+
+        encountered = self.manager.indirection_detector.find_modules(types) | module_refs
+        for dep in sorted(encountered - existing_deps):
+            if dep not in self.manager.modules:
+                continue
+            self.add_dependency(dep)
+            self.priorities[dep] = PRI_INDIRECT
+
+    def compute_fine_grained_deps(self) -> dict[str, set[str]]:
+        assert self.tree is not None
+        if self.id in ("builtins", "typing", "types", "sys", "_typeshed"):
+            # We don't track changes to core parts of typeshed -- the
+            # assumption is that they are only changed as part of mypy
+            # updates, which will invalidate everything anyway. These
+            # will always be processed in the initial non-fine-grained
+            # build. Other modules may be brought in as a result of an
+            # fine-grained increment, and we may need these
+            # dependencies then to handle cyclic imports.
+            return {}
+        from mypy.server.deps import get_dependencies  # Lazy import to speed up startup
+
+        return get_dependencies(
+            target=self.tree,
+            type_map=self.type_map(),
+            python_version=self.options.python_version,
+            options=self.manager.options,
+        )
+
+    def update_fine_grained_deps(self, deps: dict[str, set[str]]) -> None:
+        options = self.manager.options
+        if options.cache_fine_grained or options.fine_grained_incremental:
+            from mypy.server.deps import merge_dependencies  # Lazy import to speed up startup
+
+            merge_dependencies(self.compute_fine_grained_deps(), deps)
+            type_state.update_protocol_deps(deps)
+
+    def suppressed_deps_opts(self) -> bytes:
+        if not self.suppressed:
+            return b""
+        if self.known_suppressed_deps_opts:
+            return self.known_suppressed_deps_opts
+        buf = WriteBuffer()
+        import_options = self.manager.import_options
+        for dep in sorted(self.suppressed):
+            # Using .get() is a bit defensive, but just in case we have a bug elsewhere
+            # (e.g. in the daemon), it is better to get a stale cache than a crash.
+            reason = self.manager.missing_modules.get(dep, SuppressionReason.NOT_FOUND)
+            if self.priorities.get(dep) != PRI_INDIRECT:
+                write_str_bare(buf, dep)
+                write_bytes_bare(buf, import_options[dep])
+                write_int_bare(buf, reason)
+        return buf.getvalue()
+
+    def write_cache(self) -> tuple[CacheMeta, str] | None:
+        assert self.tree is not None, "Internal error: method must be called on parsed file only"
+        # We don't support writing cache files in fine-grained incremental mode.
+        if (
+            not self.path
+            or self.options.cache_dir == os.devnull
+            or self.options.fine_grained_incremental
+        ):
+            if self.options.debug_serialize:
+                try:
+                    if self.manager.options.fixed_format_cache:
+                        data = WriteBuffer()
+                        self.tree.write(data)
+                    else:
+                        self.tree.serialize()
+                except Exception:
+                    print(f"Error serializing {self.id}", file=self.manager.stdout)
+                    raise  # Propagate to display traceback
+            return None
+        dep_prios = self.dependency_priorities()
+        dep_lines = self.dependency_lines()
+        assert self.source_hash is not None
+        assert len(set(self.dependencies)) == len(
+            self.dependencies
+        ), f"Duplicates in dependencies list for {self.id} ({self.dependencies})"
+        new_interface_hash, meta_tuple = write_cache(
+            self.id,
+            self.path,
+            self.tree,
+            # Indirect dependencies are stored separately as part of CacheMetaEx.
+            [dep for dep in self.dependencies if self.priorities.get(dep) != PRI_INDIRECT],
+            [dep for dep in self.suppressed if self.priorities.get(dep) != PRI_INDIRECT],
+            self.suppressed_deps_opts(),
+            self.imports_ignored,
+            dep_prios,
+            dep_lines,
+            self.interface_hash,
+            self.trans_dep_hash,
+            self.source_hash,
+            self.ignore_all,
+            self.manager,
+        )
+        if new_interface_hash == self.interface_hash:
+            self.manager.log(f"Cached module {self.id} has same interface")
+        else:
+            self.manager.log(f"Cached module {self.id} has changed interface")
+            self.mark_interface_stale()
+            self.interface_hash = new_interface_hash
+        return meta_tuple
+
+    def verify_dependencies(self, suppressed_only: bool = False) -> None:
+        """Report errors for import targets in modules that don't exist.
+
+        If suppressed_only is set, only check suppressed dependencies.
+        """
+        manager = self.manager
+        assert self.ancestors is not None
+        # Strip out indirect dependencies. See comment in build.load_graph().
+        if suppressed_only:
+            all_deps = [dep for dep in self.suppressed if self.priorities.get(dep) != PRI_INDIRECT]
+        else:
+            dependencies = [
+                dep
+                for dep in self.dependencies + self.suppressed
+                if self.priorities.get(dep) != PRI_INDIRECT
+            ]
+            all_deps = dependencies + self.ancestors
+        for dep in all_deps:
+            if dep in manager.modules:
+                continue
+            options = manager.options.clone_for_module(dep)
+            if options.ignore_missing_imports:
+                continue
+            line = self.dep_line_map.get(dep, 1)
+            try:
+                if dep in self.ancestors:
+                    state: State | None = None
+                    ancestor: State | None = self
+                else:
+                    state, ancestor = self, None
+                # Called just for its side effects of producing diagnostics.
+                find_module_and_diagnose(
+                    manager,
+                    dep,
+                    options,
+                    caller_state=state,
+                    caller_line=line,
+                    ancestor_for=ancestor,
+                )
+            except (ModuleNotFound, CompileError):
+                # Swallow up any ModuleNotFounds or CompilerErrors while generating
+                # a diagnostic. CompileErrors may get generated in
+                # fine-grained mode when an __init__.py is deleted, if a module
+                # that was in that package has targets reprocessed before
+                # it is renamed.
+                pass
+
+    def dependency_priorities(self) -> list[int]:
+        return [
+            prio
+            for dep in self.dependencies + self.suppressed
+            if (prio := self.priorities.get(dep, PRI_HIGH)) != PRI_INDIRECT
+        ]
+
+    def dependency_lines(self) -> list[int]:
+        return [
+            self.dep_line_map.get(dep, 1)
+            for dep in self.dependencies + self.suppressed
+            if self.priorities.get(dep) != PRI_INDIRECT
+        ]
+
+    def generate_unused_ignore_notes(self) -> None:
+        if (
+            self.options.warn_unused_ignores
+            or codes.UNUSED_IGNORE in self.options.enabled_error_codes
+        ) and codes.UNUSED_IGNORE not in self.options.disabled_error_codes:
+            # We only need this for the daemon, regular incremental does this unconditionally.
+            if self.meta and self.options.fine_grained_incremental:
+                self.verify_dependencies(suppressed_only=True)
+            is_typeshed = self.tree is not None and self.tree.is_typeshed_file(self.options)
+            with self.wrap_context():
+                self.manager.errors.generate_unused_ignore_errors(self.xpath, is_typeshed)
+
+    def generate_ignore_without_code_notes(self) -> None:
+        if self.manager.errors.is_error_code_enabled(codes.IGNORE_WITHOUT_CODE):
+            is_typeshed = self.tree is not None and self.tree.is_typeshed_file(self.options)
+            with self.wrap_context():
+                self.manager.errors.generate_ignore_without_code_errors(
+                    self.xpath, self.options.warn_unused_ignores, is_typeshed
+                )
+
+
+# Module import and diagnostic glue
+
+
+def find_module_and_diagnose(
+    manager: BuildManager,
+    id: str,
+    options: Options,
+    caller_state: State | None = None,
+    caller_line: int = 0,
+    ancestor_for: State | None = None,
+    root_source: bool = False,
+    skip_diagnose: bool = False,
+) -> tuple[str, str]:
+    """Find a module by name, respecting follow_imports and producing diagnostics.
+
+    If the module is not found, then the ModuleNotFound exception is raised.
+
+    Args:
+      id: module to find
+      options: the options for the module being loaded
+      caller_state: the state of the importing module, if applicable
+      caller_line: the line number of the import
+      ancestor_for: the child module this is an ancestor of, if applicable
+      root_source: whether this source was specified on the command line
+      skip_diagnose: skip any error diagnosis and reporting (but ModuleNotFound is
+          still raised if the module is missing)
+
+    The specified value of follow_imports for a module can be overridden
+    if the module is specified on the command line or if it is a stub,
+    so we compute and return the "effective" follow_imports of the module.
+
+    Returns a tuple containing (file path, target's effective follow_imports setting)
+    """
+    result = find_module_with_reason(id, manager)
+    if isinstance(result, str):
+        # For non-stubs, look at options.follow_imports:
+        # - normal (default) -> fully analyze
+        # - silent -> analyze but silence errors
+        # - skip -> don't analyze, make the type Any
+        follow_imports = options.follow_imports
+        if (
+            root_source  # Honor top-level modules
+            or (
+                result.endswith(".pyi")  # Stubs are always normal
+                and not options.follow_imports_for_stubs  # except when they aren't
+            )
+            or id in CORE_BUILTIN_MODULES  # core is always normal
+        ):
+            follow_imports = "normal"
+        if skip_diagnose:
+            pass
+        elif follow_imports == "silent":
+            # Still import it, but silence non-blocker errors.
+            manager.log(f"Silencing {result} ({id})")
+        elif follow_imports == "skip" or follow_imports == "error":
+            # In 'error' mode, produce special error messages.
+            if id not in manager.missing_modules:
+                manager.log(f"Skipping {result} ({id})")
+            if follow_imports == "error":
+                if ancestor_for:
+                    skipping_ancestor(manager, id, result, ancestor_for)
+                else:
+                    skipping_module(manager, caller_line, caller_state, id, result)
+            reason = SuppressionReason.SKIPPED
+            if options.ignore_missing_imports:
+                # Performance optimization: when we are ignoring imports, there is no
+                # difference for the caller between skipped import and actually missing one.
+                reason = SuppressionReason.NOT_FOUND
+            raise ModuleNotFound(reason=reason)
+        if is_silent_import_module(manager, result) and not root_source:
+            follow_imports = "silent"
+        return result, follow_imports
+    else:
+        # Could not find a module.  Typically, the reason is a
+        # misspelled module name, missing stub, module not in
+        # search path or the module has not been installed.
+
+        ignore_missing_imports = options.ignore_missing_imports
+
+        if skip_diagnose:
+            raise ModuleNotFound
+        if caller_state:
+            if not (ignore_missing_imports or in_partial_package(id, manager)):
+                module_not_found(manager, caller_line, caller_state, id, result)
+            raise ModuleNotFound
+        elif root_source:
+            # If we can't find a root source it's always fatal.
+            # TODO: This might hide non-fatal errors from
+            # root sources processed earlier.
+            raise CompileError([f'mypy: error: Cannot find module "{id}"'])
+        else:
+            raise ModuleNotFound
+
+
+def exist_added_packages(suppressed: list[str], manager: BuildManager) -> bool:
+    """Find if there are any newly added packages that were previously suppressed.
+
+    Exclude everything not in build for follow-imports=skip.
+    """
+    for dep in suppressed:
+        if dep in manager.source_set.source_modules:
+            # We don't need to add any special logic for this. If a module
+            # is added to build, importers will be invalidated by normal mechanism.
+            continue
+        path = find_module_simple(dep, manager)
+        if not path:
+            continue
+        options = manager.options.clone_for_module(dep)
+        # Technically this is not 100% correct, since we can have:
+        #     from pkg import mod
+        # with
+        #     [mypy-pkg]
+        #     follow-import = silent
+        #     [mypy-pkg.mod]
+        #     follow-imports = normal
+        # But such cases are extremely rare, and this allows us to avoid
+        # massive performance impact in much more common situations.
+        if options.follow_imports in ("skip", "error") and (
+            not path.endswith(".pyi") or options.follow_imports_for_stubs
+        ):
+            continue
+        if os.path.basename(path) in ("__init__.py", "__init__.pyi"):
+            return True
+    return False
+
+
+def exist_removed_submodules(dependencies: list[str], manager: BuildManager) -> bool:
+    """Find if there are any submodules of packages that are now missing.
+
+    This is conceptually an inverse of exist_added_packages().
+    """
+    dependencies_set = set(dependencies)
+    for dep in dependencies:
+        if "." not in dep:
+            continue
+        if dep in manager.source_set.source_modules:
+            # We still know it is definitely a module.
+            continue
+        direct_ancestor, _ = dep.rsplit(".", maxsplit=1)
+        if direct_ancestor not in dependencies_set:
+            continue
+        if find_module_simple(dep, manager) is None:
+            return True
+    return False
+
+
+def find_module_simple(id: str, manager: BuildManager) -> str | None:
+    """Find a filesystem path for module `id` or `None` if not found."""
+    if manager.stats_enabled:
+        t0 = time.time()
+    x = manager.find_module_cache.find_module(id, fast_path=True)
+    if manager.stats_enabled:
+        manager.add_stats(find_module_time=time.time() - t0, find_module_calls=1)
+    if isinstance(x, ModuleNotFoundReason):
+        return None
+    return x
+
+
+def find_module_with_reason(id: str, manager: BuildManager) -> ModuleSearchResult:
+    """Find a filesystem path for module `id` or the reason it can't be found."""
+    if manager.stats_enabled:
+        t0 = time.time()
+    x = manager.find_module_cache.find_module(id, fast_path=False)
+    if manager.stats_enabled:
+        manager.add_stats(find_module_time=time.time() - t0, find_module_calls=1)
+    return x
+
+
+def in_partial_package(id: str, manager: BuildManager) -> bool:
+    """Check if a missing module can potentially be a part of a package.
+
+    This checks if there is any existing parent __init__.pyi stub that
+    defines a module-level __getattr__ (a.k.a. partial stub package).
+    """
+    while "." in id:
+        ancestor, _ = id.rsplit(".", 1)
+        if ancestor in manager.known_partial_packages:
+            return manager.known_partial_packages[ancestor]
+        if ancestor in manager.modules:
+            ancestor_mod: MypyFile | None = manager.modules[ancestor]
+        else:
+            # Ancestor is not in build, try quickly if we can find it.
+            try:
+                ancestor_st = State.new_state(
+                    id=ancestor, path=None, source=None, manager=manager, temporary=True
+                )
+            except (ModuleNotFound, CompileError):
+                ancestor_mod = None
+            else:
+                ancestor_mod = ancestor_st.tree
+                # We will not need this anymore.
+                ancestor_st.tree = None
+        if ancestor_mod is not None:
+            # Bail out soon, complete subpackage found
+            manager.known_partial_packages[ancestor] = ancestor_mod.is_partial_stub_package
+            return ancestor_mod.is_partial_stub_package
+        id = ancestor
+    return False
+
+
+def module_not_found(
+    manager: BuildManager,
+    line: int,
+    caller_state: State,
+    target: str,
+    reason: ModuleNotFoundReason,
+) -> None:
+    errors = manager.errors
+    save_import_context = errors.import_context()
+    errors.set_import_context(caller_state.import_context)
+    errors.set_file(caller_state.xpath, caller_state.id, caller_state.options)
+    errors.set_file_ignored_lines(
+        caller_state.xpath,
+        caller_state.tree.ignored_lines if caller_state.tree else caller_state.imports_ignored,
+        caller_state.ignore_all or caller_state.options.ignore_errors,
+    )
+    if target == "builtins":
+        manager.error(
+            line, 'Cannot find "builtins" module. Typeshed appears broken!', blocker=True
+        )
+        errors.raise_error()
+    else:
+        daemon = manager.options.fine_grained_incremental
+        msg, notes = reason.error_message_templates(daemon)
+        if reason == ModuleNotFoundReason.NOT_FOUND:
+            code = codes.IMPORT_NOT_FOUND
+        elif (
+            reason == ModuleNotFoundReason.FOUND_WITHOUT_TYPE_HINTS
+            or reason == ModuleNotFoundReason.APPROVED_STUBS_NOT_INSTALLED
+        ):
+            code = codes.IMPORT_UNTYPED
+        else:
+            code = codes.IMPORT
+        manager.error(line, msg.format(module=target), code=code)
+
+        if (
+            reason == ModuleNotFoundReason.NOT_FOUND
+            and not errors.prefer_simple_messages()
+            and errors.is_error_code_enabled(code)
+            and line not in errors.ignored_lines.get(caller_state.xpath, {})
+        ):
+            top_level_target = target.split(".")[0]
+            if not top_level_target.startswith("_"):
+                known_modules = get_known_modules(
+                    manager.find_module_cache.stdlib_py_versions, manager.options.python_version
+                )
+                matches = best_matches(top_level_target, known_modules, n=3)
+                matches = [m for m in matches if m.lower() != top_level_target.lower()]
+                if matches:
+                    errors.report(
+                        line,
+                        0,
+                        f'Did you mean {pretty_seq(matches, "or")}?',
+                        severity="note",
+                        code=code,
+                    )
+
+        dist = stub_distribution_name(target)
+        for note in notes:
+            if "{stub_dist}" in note:
+                assert dist is not None
+                note = note.format(stub_dist=dist)
+            manager.note(line, note, only_once=True, code=code)
+        if reason is ModuleNotFoundReason.APPROVED_STUBS_NOT_INSTALLED:
+            assert dist is not None
+            manager.missing_stub_packages.add(dist)
+    errors.set_import_context(save_import_context)
+
+
+def skipping_module(
+    manager: BuildManager, line: int, caller_state: State | None, id: str, path: str
+) -> None:
+    """Produce an error for an import ignored due to --follow_imports=error"""
+    assert caller_state, (id, path)
+    save_import_context = manager.errors.import_context()
+    manager.errors.set_import_context(caller_state.import_context)
+    manager.errors.set_file(caller_state.xpath, caller_state.id, manager.options)
+    manager.error(line, f'Import of "{id}" ignored')
+    manager.note(
+        line, "(Using --follow-imports=error, module not passed on command line)", only_once=True
+    )
+    manager.errors.set_import_context(save_import_context)
+
+
+def skipping_ancestor(manager: BuildManager, id: str, path: str, ancestor_for: State) -> None:
+    """Produce an error for an ancestor ignored due to --follow_imports=error"""
+    # TODO: Read the path (the __init__.py file) and return
+    # immediately if it's empty or only contains comments.
+    # But beware, some package may be the ancestor of many modules,
+    # so we'd need to cache the decision.
+    save_import_context = manager.errors.import_context()
+    manager.errors.set_import_context([])
+    manager.errors.set_file(ancestor_for.xpath, ancestor_for.id, manager.options)
+    manager.error(None, f'Ancestor package "{id}" ignored', only_once=True)
+    manager.note(
+        None, "(Using --follow-imports=error, submodule passed on command line)", only_once=True
+    )
+    manager.errors.set_import_context(save_import_context)
+
+
+def log_configuration(manager: BuildManager, sources: list[BuildSource]) -> None:
+    """Output useful configuration information to LOG and TRACE"""
+
+    if not manager.logging_enabled:
+        return
+
+    config_file = manager.options.config_file
+    if config_file:
+        config_file = os.path.abspath(config_file)
+
+    manager.log()
+    configuration_vars = [
+        ("Mypy Version", __version__),
+        ("Config File", (config_file or "Default")),
+        ("Configured Executable", manager.options.python_executable or "None"),
+        ("Current Executable", sys.executable),
+        ("Cache Dir", manager.options.cache_dir),
+        ("Compiled", str(not __file__.endswith(".py"))),
+        ("Exclude", manager.options.exclude),
+    ]
+
+    for conf_name, conf_value in configuration_vars:
+        manager.log(f"{conf_name + ':':24}{conf_value}")
+
+    for source in sources:
+        manager.log(f"{'Found source:':24}{source}")
+
+    # Complete list of searched paths can get very long, put them under TRACE
+    for path_type, paths in manager.search_paths.asdict().items():
+        if not paths:
+            manager.trace(f"No {path_type}")
+            continue
+
+        manager.trace(f"{path_type}:")
+
+        for pth in paths:
+            manager.trace(f"    {pth}")
+
+
+# The driver
+
+
+def dispatch(
+    sources: list[BuildSource],
+    manager: BuildManager,
+    stdout: TextIO,
+    connect_threads: list[Thread],
+) -> Graph:
+    log_configuration(manager, sources)
+
+    t0 = time.time()
+
+    # We disable GC while loading the graph as a performance optimization for
+    # cold-cache runs. The parsed ASTs are trees, and therefore should not have any
+    # reference cycles. This is an important optimization, since we create a lot of
+    # new objects while parsing files.
+    global initial_gc_freeze_done
+    if (
+        not manager.options.test_env
+        and platform.python_implementation() == "CPython"
+        and not initial_gc_freeze_done
+    ):
+        gc.disable()
+    graph = load_graph(sources, manager)
+
+    # This is a kind of unfortunate hack to work around some of fine-grained's
+    # fragility: if we have loaded less than 50% of the specified files from
+    # cache in fine-grained cache mode, load the graph again honestly.
+    # In this case, we just turn the cache off entirely, so we don't need
+    # to worry about some files being loaded and some from cache and so
+    # that fine-grained mode never *writes* to the cache.
+    if manager.use_fine_grained_cache() and len(graph) < 0.50 * len(sources):
+        manager.log("Redoing load_graph without cache because too much was missing")
+        manager.cache_enabled = False
+        graph = load_graph(sources, manager)
+
+    if (
+        not manager.options.test_env
+        and platform.python_implementation() == "CPython"
+        and not initial_gc_freeze_done
+    ):
+        gc.freeze()
+        gc.unfreeze()
+        gc.enable()
+        initial_gc_freeze_done = True
+
+    for id in graph:
+        manager.import_map[id] = graph[id].dependencies_set
+
+    t1 = time.time()
+    manager.add_stats(
+        graph_size=len(graph),
+        stubs_found=sum(g.path is not None and g.path.endswith(".pyi") for g in graph.values()),
+        graph_load_time=(t1 - t0),
+        fm_cache_size=len(manager.find_module_cache.results),
+    )
+    if not graph:
+        print("Nothing to do?!", file=stdout)
+        return graph
+    manager.log(f"Loaded graph with {len(graph)} nodes ({t1 - t0:.3f} sec)")
+    if manager.options.dump_graph:
+        dump_graph(graph, stdout)
+        return graph
+
+    # Fine-grained dependencies that didn't have an associated module in the build
+    # are serialized separately, so we read them after we load the graph.
+    # We need to read them both for running in daemon mode and if we are generating
+    # a fine-grained cache (so that we can properly update them incrementally).
+    # The `read_deps_cache` will also validate
+    # the deps cache against the loaded individual cache files.
+    if manager.options.cache_fine_grained or manager.use_fine_grained_cache():
+        t2 = time.time()
+        fg_deps_meta = read_deps_cache(manager, graph)
+        manager.add_stats(load_fg_deps_time=time.time() - t2)
+        if fg_deps_meta is not None:
+            manager.fg_deps_meta = fg_deps_meta
+        elif manager.stats.get("fresh_metas", 0) > 0:
+            # Clear the stats, so we don't infinite loop because of positive fresh_metas
+            manager.stats.clear()
+            # There were some cache files read, but no fine-grained dependencies loaded.
+            manager.log("Error reading fine-grained dependencies cache -- aborting cache load")
+            manager.cache_enabled = False
+            manager.log("Falling back to full run -- reloading graph...")
+            return dispatch(sources, manager, stdout, connect_threads)
+
+    # If we are loading a fine-grained incremental mode cache, we
+    # don't want to do a real incremental reprocess of the
+    # graph---we'll handle it all later.
+    if not manager.use_fine_grained_cache():
+        # Wait for workers since they may be needed at this point.
+        for thread in connect_threads:
+            thread.join()
+        not_connected = [str(idx) for idx, wc in enumerate(manager.workers) if not wc.connected]
+        if not_connected:
+            raise OSError(f"Cannot connect to build worker(s): {', '.join(not_connected)}")
+        process_graph(graph, manager)
+        # Update plugins snapshot.
+        write_plugins_snapshot(manager)
+        manager.old_plugins_snapshot = manager.plugins_snapshot
+        if manager.options.cache_fine_grained or manager.options.fine_grained_incremental:
+            # If we are running a daemon or are going to write cache for further fine-grained use,
+            # then we need to collect fine-grained protocol dependencies.
+            # Since these are a global property of the program, they are calculated after we
+            # processed the whole graph.
+            type_state.add_all_protocol_deps(manager.fg_deps)
+            if not manager.options.fine_grained_incremental:
+                rdeps = generate_deps_for_cache(manager, graph)
+                write_deps_cache(rdeps, manager, graph)
+
+    if manager.options.dump_deps:
+        # This speeds up startup a little when not using the daemon mode.
+        from mypy.server.deps import dump_all_dependencies
+
+        dump_all_dependencies(
+            manager.modules, manager.all_types, manager.options.python_version, manager.options
+        )
+
+    return graph
+
+
+class NodeInfo:
+    """Some info about a node in the graph of SCCs."""
+
+    def __init__(self, index: int, scc: list[str]) -> None:
+        self.node_id = "n%d" % index
+        self.scc = scc
+        self.sizes: dict[str, int] = {}  # mod -> size in bytes
+        self.deps: dict[str, int] = {}  # node_id -> pri
+
+    def dumps(self) -> str:
+        """Convert to JSON string."""
+        total_size = sum(self.sizes.values())
+        return "[{}, {}, {},\n     {},\n     {}]".format(
+            json.dumps(self.node_id),
+            json.dumps(total_size),
+            json.dumps(self.scc),
+            json.dumps(self.sizes),
+            json.dumps(self.deps),
+        )
+
+
+def dump_timing_stats(path: str, graph: Graph) -> None:
+    """Dump timing stats for each file in the given graph."""
+    with open(path, "w") as f:
+        for id in sorted(graph):
+            f.write(f"{id} {graph[id].time_spent_us}\n")
+
+
+def dump_line_checking_stats(path: str, graph: Graph) -> None:
+    """Dump per-line expression type checking stats."""
+    with open(path, "w") as f:
+        for id in sorted(graph):
+            if not graph[id].per_line_checking_time_ns:
+                continue
+            f.write(f"{id}:\n")
+            for line in sorted(graph[id].per_line_checking_time_ns):
+                line_time = graph[id].per_line_checking_time_ns[line]
+                f.write(f"{line:>5} {line_time/1000:8.1f}\n")
+
+
+def dump_graph(graph: Graph, stdout: TextIO | None = None) -> None:
+    """Dump the graph as a JSON string to stdout.
+
+    This copies some of the work by process_graph()
+    (sorted_components() and order_ascc()).
+    """
+    stdout = stdout or sys.stdout
+    nodes = []
+    sccs = sorted_components(graph)
+    for i, ascc in enumerate(sccs):
+        scc = order_ascc(graph, ascc.mod_ids)
+        node = NodeInfo(i, scc)
+        nodes.append(node)
+    inv_nodes = {}  # module -> node_id
+    for node in nodes:
+        for mod in node.scc:
+            inv_nodes[mod] = node.node_id
+    for node in nodes:
+        for mod in node.scc:
+            state = graph[mod]
+            size = 0
+            if state.path:
+                try:
+                    size = os.path.getsize(state.path)
+                except OSError:
+                    pass
+            node.sizes[mod] = size
+            for dep in state.dependencies:
+                if dep in state.priorities:
+                    pri = state.priorities[dep]
+                    if dep in inv_nodes:
+                        dep_id = inv_nodes[dep]
+                        if dep_id != node.node_id and (
+                            dep_id not in node.deps or pri < node.deps[dep_id]
+                        ):
+                            node.deps[dep_id] = pri
+    print("[" + ",\n ".join(node.dumps() for node in nodes) + "\n]", file=stdout)
+
+
+def load_graph(
+    sources: list[BuildSource],
+    manager: BuildManager,
+    old_graph: Graph | None = None,
+    new_modules: list[State] | None = None,
+) -> Graph:
+    """Given some source files, load the full dependency graph.
+
+    If an old_graph is passed in, it is used as the starting point and
+    modified during graph loading.
+
+    If a new_modules is passed in, any modules that are loaded are
+    added to the list. This is an argument and not a return value
+    so that the caller can access it even if load_graph fails.
+
+    As this may need to parse files, this can raise CompileError in case
+    there are syntax errors.
+    """
+
+    graph: Graph = old_graph if old_graph is not None else {}
+
+    # The deque is used to implement breadth-first traversal.
+    # TODO: Consider whether to go depth-first instead.  This may
+    # affect the order in which w

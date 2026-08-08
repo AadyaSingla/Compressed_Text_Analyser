@@ -1,7 +1,12 @@
 {% extends "base.html" %}
 {% block title %}{{ label }} · Compressed Text Analyser{% endblock %}
 {% block content %}
-  <h2>Results — {{ label }}</h2>
+  <div class="plot-head">
+    <h2>Results — {{ label }}</h2>
+    <form method="post" action="{{ url_for('save_results_plot', ihash=ihash) }}">
+      <button class="small" type="submit">Save PDF</button>
+    </form>
+  </div>
 
   <img class="plot" src="{{ url_for('plot', ihash=ihash) }}"
        alt="Compression utility and vocabulary size vs k">

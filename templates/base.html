@@ -26,6 +26,11 @@
              padding: .55rem 1.1rem; font: inherit; cursor: pointer; margin-top: 1rem; }
     a.button { display: inline-block; text-decoration: none; }
     button.danger { background: #b04040; margin-top: 0; padding: .3rem .7rem; font-size: .85rem; }
+    button.small { margin-top: 0; padding: .3rem .7rem; font-size: .85rem; }
+    .plot-head { display: flex; align-items: center; justify-content: space-between;
+                 gap: 1rem; margin-top: 1.25rem; }
+    .plot-head h2 { margin: 0; }
+    .plot-head form { margin: 0; }
     .muted { color: var(--muted); }
     pre.preview { background: #f7f8fb; border: 1px solid var(--line); border-radius: 6px;
                   padding: .75rem; white-space: pre-wrap; font-size: .85rem; }
@@ -36,7 +41,8 @@
 </head>
 <body>
   <h1><a href="{{ url_for('index') }}">Compressed Text Analyser</a> <span class="muted">· BPE experiments</span>
-    · <a href="{{ url_for('analysis') }}">Cross-file analysis</a></h1>
+    · <a href="{{ url_for('analysis') }}">Cross-file analysis</a>
+    · <a href="{{ url_for('figures') }}">Saved figures</a></h1>
   {% with messages = get_flashed_messages() %}
     {% for m in messages %}<div class="flash">{{ m }}</div>{% endfor %}
   {% endwith %}

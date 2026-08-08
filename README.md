@@ -26,7 +26,8 @@ Built as part of a thesis on compressed text analysis.
 9. [Running the app](#running-the-app)
 10. [Tests](#tests)
 11. [Using it](#using-it)
-12. [Data storage and deduplication](#data-storage-and-deduplication)
+12. [Saving figures](#saving-figures)
+13. [Data storage and deduplication](#data-storage-and-deduplication)
 
 ---
 
@@ -271,10 +272,14 @@ templates/
   index.html               Home page: input form + list of stored inputs
   results.html             Results page: stats table + input preview
   analysis.html            Cross-file page: summary table + comparison plots
+  figures.html             Saved-figures page: PDFs written by Save PDF
 data/
-  sample_english.txt       Built-in English prose sample
-  sample_code.py           Built-in Python-code sample
+  english.txt              Full English corpus the english_*k slices are cut from
+  python.txt               Full Python corpus the python_*k slices are cut from
+  english_10k.txt …_40k    Size-graded English samples (10k–40k chars, step 5k)
+  python_10k.txt …_40k     Size-graded Python samples (same sizes)
   uploads/                 Copies of uploaded files (created on first upload)
+figures/                   Vector PDFs written by the Save PDF buttons
 experiments.db             SQLite database (created automatically on first run)
 ```
 
@@ -620,9 +625,12 @@ these caps.
   honest answer for a stale bookmark after a delete) and renders the table,
   the plot, and a 400-character preview of the input.
 
-- **`plot(ihash)`** — `GET /plot/<ihash>.png`, streamed from memory
-  (`io.BytesIO`, nothing written to disk). Two side-by-side matplotlib
-  charts — compression utility vs k, and vocabulary size vs k — built with
+- **`_build_results_figure(ihash)` + `plot(ihash)`** — `GET
+  /plot/<ihash>.png`, streamed from memory (`io.BytesIO`, nothing written to
+  disk). Building the figure and sending it are two functions, not one, so
+  the same figure can also be written to disk as a PDF (see [Saving
+  figures](#saving-figures)) without the two output formats ever drifting
+  apart. Two side-by-side matplotlib charts — compression utility vs k, and vocabulary size vs k — built with
   `matplotlib.use("Agg")` set before `pyplot` is imported (the app runs
   headless; without this, Flask can crash on macOS). Rows are grouped by
   `category` first, so a hash with rows in both categories draws one line
@@ -638,16 +646,57 @@ these caps.
   `results()` it isn't scoped to a hash — it's the only page in the app
   that looks at every input at once.
 
-- **`_analysis_scatter(y_field, y_label, title)` + `analysis_elbow_plot()` /
+- **`_build_analysis_figure(y_field, y_label, title)` + `analysis_elbow_plot()` /
   `analysis_captured_plot()`** — `GET /analysis/elbow.png` and
   `/analysis/captured.png`. The two plots differ only in which summary
-  column goes on the y-axis, so they're two three-line routes over one
-  helper. Points are grouped and coloured by category with the **same
+  column goes on the y-axis, so their three arguments live in one
+  `ANALYSIS_PLOTS` dict keyed by name, which both the PNG routes and the
+  Save PDF route read — the name in the URL (`elbow`, `captured`) is the
+  key, so a new cross-file plot is one dict entry plus one route. Points are grouped and coloured by category with the **same
   palette as `plot()`** (`code` = `#4058B0`, `english` = `#B05840`) so the
   mapping carries across pages, and the legend is drawn only when more than
   one category is present — same rule, same reason. Like `plot()`, the PNG
   is streamed from `io.BytesIO` and the figure is `plt.close()`d after
   saving.
+
+- **`_serve_png(fig)` / `_save_pdf(fig, stem)`** — the two things the app
+  does with a finished figure: stream it to the browser as a PNG, or write
+  it into `figures/` as a vector PDF. Both `plt.close()` the figure, which
+  is why every plot route ends in exactly one of them — a figure that
+  reaches neither would leak across requests. PNG for the screen (fast,
+  fixed-resolution) and PDF for the file (vector, so it stays sharp at any
+  size in a thesis document) is the whole reason for the split.
+
+- **`save_results_plot(ihash)` / `save_analysis_plot(name)`** —
+  `POST /save/results/<ihash>` and `POST /save/analysis/<name>`, behind the
+  **Save PDF** button next to each graph. POST rather than GET because they
+  write a file. Each builds the same figure the PNG route would and hands
+  it to `_save_pdf` under a **stable filename** — `analysis_<name>` for the
+  cross-file plots, `results_<label>_<first 8 of hash>` for a per-input one
+  — so saving the same graph again overwrites its file instead of
+  accumulating near-identical copies. The hash fragment is in the name
+  because labels aren't unique (two different uploads can share a
+  filename), and `_safe_stem()` reduces the label to `[A-Za-z0-9_-]` first,
+  since it comes from a sample name or an uploaded filename and can carry
+  separators or spaces. Both flash a confirmation and redirect back to the
+  page the button was on.
+
+- **`figures()` / `figure_file(name)` / `delete_figure(name)`** — `GET
+  /figures` lists every saved PDF newest-first (name, save time, size),
+  `GET /figures/<name>` serves one, `POST /figures/<name>/delete` removes
+  one. `_figure_path(name)` is the shared gatekeeper: `name` arrives from
+  the URL, so it's checked twice — a `[A-Za-z0-9_.-]+\.pdf` pattern rules
+  out separators and `..` segments up front, and a resolved-parent check
+  catches anything that gets past it (a symlink pointing out of the folder,
+  say). Anything else 404s before the filesystem is touched. Two checks
+  rather than one because the pattern alone can't see symlinks and the
+  resolve alone would still let odd names through.
+
+- **`_sample_names()`** — the sample dropdown's order. Plain string sorting
+  would read correctly today, but only by accident of every size being two
+  digits: it would put `english_5k` after `english_35k`. Sorting on
+  (category, the number parsed out of the suffix) keeps the dropdown in
+  ascending size order whatever sizes `SAMPLE_SIZES` grows to.
 
 - **`delete(ihash)`** — POST-only, because anything that destroys data must
   never be reachable by a GET (browsers and crawlers can prefetch links). A
@@ -658,7 +707,7 @@ these caps.
 
 ### `templates/` — the presentation layer
 
-Four Jinja templates extending one base, with all CSS inline in a
+Five Jinja templates extending one base, with all CSS inline in a
 `<style>` block in `base.html` — at this size, a separate stylesheet buys
 nothing.
 
@@ -667,9 +716,11 @@ nothing.
   The `.num` class right-aligns numbers with `font-variant-numeric:
   tabular-nums`, since the UI is mostly tables of numbers meant to be
   compared down a column. The heading carries the app's only navigation:
-  the title links home, and a **Cross-file analysis** link sits beside it,
-  so `/analysis` is reachable from every page rather than only from the
-  home page.
+  the title links home, and **Cross-file analysis** and **Saved figures**
+  links sit beside it, so `/analysis` and `/figures` are reachable from
+  every page rather than only from the home page. The `.plot-head` rule is
+  what puts a **Save PDF** button on the same line as a graph's heading
+  (flex, pushed to opposite ends) instead of below it.
 - **`index.html`** — one form containing both input methods (file upload,
   sample dropdown), a required category radio group (Source code / English
   language), the k and step fields, and three controls: **Clean** and
@@ -707,15 +758,41 @@ nothing.
   the database directly, but a table wide enough to hold every field stops
   being readable. When no summaries exist yet it says so and points at the
   home page, rather than rendering an empty table above two empty plots.
+  Each of the two plots sits under a `.plot-head` block pairing its heading
+  with a **Save PDF** button.
+- **`figures.html`** — the saved-figures page: one row per PDF in
+  `figures/` (name linking to the file, save time, size, delete button), or
+  a line saying nothing has been saved yet. Like the other tables it's
+  loops and output only; the sorting and formatting happen in `figures()`.
 
 ### `data/`
 
-`sample_english.txt` and `sample_code.py` exist so the app is useful within
-seconds of first launch, with zero input preparation — and the choice isn't
-arbitrary: prose vs. source code is the comparison the thesis cares about
-(code tends to be more repetitive, so it compresses better, and the two
-samples make that visible immediately). `uploads/` holds retained copies of
-uploaded files; `experiments.db` is created here automatically on first run.
+The bundled samples are **size-graded slices**: consecutive,
+non-overlapping cuts from one English corpus (`english.txt`, Shakespeare)
+and one source-code corpus (`python.txt`), at exact character lengths —
+10k, 15k, 20k, 25k, 30k, 35k, and 40k, giving 14 samples in all. The sizes
+come from `SAMPLE_SIZES` in `config.py` and the filenames are derived from
+it, so adding a size means adding a number there and cutting the matching
+file.
+
+Two things make this a usable experiment rather than just convenient demo
+data. First, prose vs. source code is the comparison the thesis cares about
+(code is more repetitive, so it compresses better). Second, within a
+category every slice comes from the *same source at the same register*, so
+comparing `english_10k` against `english_40k` varies input size and nothing
+else — which is exactly what the `/analysis` plots put on their x-axis.
+Non-overlapping matters for the same reason: overlapping slices would share
+text, and the larger sample would inherit the smaller one's merges.
+
+`uploads/` holds retained copies of uploaded files; `experiments.db` is
+created here automatically on first run.
+
+### `figures/`
+
+Where **Save PDF** writes. It's tracked in git, unlike `data/uploads/` and
+`experiments.db` — the figures are thesis output meant to be kept and
+referenced, not scratch input that can be regenerated by re-uploading a
+file.
 
 ---
 
@@ -766,8 +843,9 @@ suite can never touch a real `experiments.db`.
 ## Using it
 
 1. Provide a file one of two ways: **upload** it, or pick a built-in
-   **sample** (English prose or Python code). Those are the only two input
-   methods — there's no paste box. If both are given, the sample wins.
+   **sample** — English prose or Python code, at 10k, 15k, 20k, 25k, 30k,
+   35k, or 40k characters. Those are the only two input methods — there's
+   no paste box. If both are given, the sample wins.
 2. Choose a **category** — Source code or English language. This is
    required and never inferred: it decides which cleaning rules the Clean
    button would apply (indentation is preserved for code, collapsed for
@@ -785,6 +863,8 @@ suite can never touch a real `experiments.db`.
    and how much of the available compression that elbow captures, plus both
    against input size as scatter plots. Every run adds to this page
    automatically — there's nothing extra to click.
+6. Click **Save PDF** next to any graph to keep a vector copy of it (see
+   [Saving figures](#saving-figures)).
 
 Limits: input up to 200,000 characters, k up to 2000.
 
@@ -796,6 +876,32 @@ cleaning changes the text, each combination lands on its own results page
 with its own graph — there's no single page that merges them, by design;
 compare the two pages side by side, or use `/analysis` to see them as
 separate points.
+
+## Saving figures
+
+Every graph in the app — the per-input utility/vocabulary pair on a results
+page, and both cross-file plots on `/analysis` — has a **Save PDF** button
+beside its heading. Clicking it writes that graph into the project's
+`figures/` folder as a **vector PDF** and flashes a confirmation.
+
+- **Why PDF and not the PNG already on screen.** The on-screen plot is a
+  fixed-resolution raster sized for a browser; a thesis figure gets scaled
+  and printed. A vector PDF has no resolution to lose, so the same figure
+  stays sharp at any size. The two formats are generated from the *same*
+  figure-building function, so what's saved is always what was shown.
+- **Filenames are stable, so saving twice replaces rather than
+  accumulates.** A cross-file plot saves as `analysis_elbow.pdf` or
+  `analysis_captured.pdf`; a per-input plot as
+  `results_<label>_<hash8>.pdf`. Re-run an input, click Save PDF again, and
+  its file is updated in place — you never end up choosing between six
+  near-identical PDFs of the same graph, and a figure referenced from a
+  document keeps its path.
+- **`figures/` is tracked in git**, unlike `data/uploads/` and
+  `experiments.db`: saved figures are output worth keeping and versioning,
+  not disposable local state.
+- **The Saved figures page** (header link on every page, or `/figures`)
+  lists everything saved so far, newest first, with its save time and size.
+  Each name links to the PDF, and each row has a delete button.
 
 ## Data storage and deduplication
 

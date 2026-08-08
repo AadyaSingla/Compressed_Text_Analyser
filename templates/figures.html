@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Saved figures · Compressed Text Analyser{% endblock %}
+{% block content %}
+  <h2>Saved figures</h2>
+  <p class="muted">Vector PDFs written by the Save PDF buttons, stored in the
+    project's <code>figures/</code> folder. Saving the same graph again replaces
+    its file.</p>
+
+  {% if figures %}
+  <table>
+    <tr>
+      <th>File</th><th>Saved</th><th class="num">Size</th><th></th>
+    </tr>
+    {% for f in figures %}
+    <tr>
+      <td><a href="{{ url_for('figure_file', name=f['name']) }}">{{ f['name'] }}</a></td>
+      <td class="muted">{{ f['saved_at'] }}</td>
+      <td class="num">{{ "%.0f"|format(f['size_kb']) }} KB</td>
+      <td>
+        <form method="post" action="{{ url_for('delete_figure', name=f['name']) }}">
+          <button class="danger" type="submit">Delete</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+    <p class="muted">Nothing saved yet — click Save PDF above any graph.</p>
+  {% endif %}
+{% endblock %}

@@ -26,11 +26,21 @@
     {% endfor %}
   </table>
 
-  <h2>Elbow k vs input size</h2>
+  <div class="plot-head">
+    <h2>Elbow k vs input size</h2>
+    <form method="post" action="{{ url_for('save_analysis_plot', name='elbow') }}">
+      <button class="small" type="submit">Save PDF</button>
+    </form>
+  </div>
   <img class="plot" src="{{ url_for('analysis_elbow_plot') }}"
        alt="Elbow k vs input size, by category">
 
-  <h2>Utility captured at elbow vs input size</h2>
+  <div class="plot-head">
+    <h2>Utility captured at elbow vs input size</h2>
+    <form method="post" action="{{ url_for('save_analysis_plot', name='captured') }}">
+      <button class="small" type="submit">Save PDF</button>
+    </form>
+  </div>
   <img class="plot" src="{{ url_for('analysis_captured_plot') }}"
        alt="Percent of max utility captured at elbow vs input size, by category">
   {% else %}

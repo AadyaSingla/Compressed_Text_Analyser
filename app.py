@@ -1,7 +1,9 @@
 """Flask app for the compressed-text analyser (BPE thesis experiments)."""
 
 import io
+import re
 from collections import defaultdict
+from datetime import datetime
 
 import matplotlib
 
@@ -22,7 +24,7 @@ from flasgger import Swagger
 import bpe
 import db
 from api import api_bp
-from config import MAX_INPUT_CHARS, MAX_K, SAMPLES, UPLOAD_DIR
+from config import FIGURE_DIR, MAX_INPUT_CHARS, MAX_K, SAMPLES, UPLOAD_DIR
 
 app = Flask(__name__)
 app.secret_key = "bpe-thesis-dev-key"
@@ -86,11 +88,19 @@ def _parse_ks():
     return [k_max]
 
 
+def _sample_names():
+    """Sample names grouped by category, ascending by size. Sorting the names
+    as plain strings happens to read correctly while every size is two digits,
+    but would put a `english_5k` after `english_35k` — so sort on the number."""
+    return sorted(SAMPLES, key=lambda name: (name.rsplit("_", 1)[0],
+                                             int(name.rsplit("_", 1)[1].rstrip("k"))))
+
+
 def _render_index(**prefill):
     conn = db.connect()
     inputs = db.list_inputs(conn)
     conn.close()
-    return render_template("index.html", inputs=inputs, samples=sorted(SAMPLES),
+    return render_template("index.html", inputs=inputs, samples=_sample_names(),
                            **prefill)
 
 
@@ -177,11 +187,37 @@ def results(ihash):
                            truncated=len(full_text) > 400)
 
 
-@app.route("/plot/<ihash>.png")
-def plot(ihash):
-    """Compression utility and vocabulary size vs k, as a PNG. One line
-    per category if a hash has rows from more than one (still possible —
-    category, unlike cleaned, stays part of an experiment's identity)."""
+def _serve_png(fig):
+    """Send a figure to the browser as a PNG, closing it afterwards."""
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=120)
+    plt.close(fig)
+    buf.seek(0)
+    return send_file(buf, mimetype="image/png")
+
+
+def _save_pdf(fig, stem):
+    """Write a figure to FIGURE_DIR as a vector PDF and close it. Stable
+    filename per graph, so re-saving replaces the previous version rather
+    than piling up near-identical files."""
+    FIGURE_DIR.mkdir(parents=True, exist_ok=True)
+    path = FIGURE_DIR / f"{stem}.pdf"
+    fig.savefig(path, format="pdf")
+    plt.close(fig)
+    return path
+
+
+def _safe_stem(label):
+    """Filename-safe version of a label. Labels come from sample names and
+    uploaded filenames, so they can carry separators and spaces."""
+    cleaned = re.sub(r"[^A-Za-z0-9_-]+", "_", label).strip("_")
+    return cleaned or "figure"
+
+
+def _build_results_figure(ihash):
+    """Compression utility and vocabulary size vs k. One line per category
+    if a hash has rows from more than one (still possible — category,
+    unlike cleaned, stays part of an experiment's identity)."""
     conn = db.connect()
     rows = db.rows_for_input(conn, ihash)
     conn.close()
@@ -217,12 +253,25 @@ def plot(ihash):
     status_word = "Cleaned" if rows[0]["cleaned"] else "Raw"
     fig.suptitle(f"{rows[0]['label']} — {status_word}")
     fig.tight_layout()
+    return fig
 
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=120)
-    plt.close(fig)
-    buf.seek(0)
-    return send_file(buf, mimetype="image/png")
+
+@app.route("/plot/<ihash>.png")
+def plot(ihash):
+    return _serve_png(_build_results_figure(ihash))
+
+
+@app.route("/save/results/<ihash>", methods=["POST"])
+def save_results_plot(ihash):
+    conn = db.connect()
+    rows = db.rows_for_input(conn, ihash)
+    conn.close()
+    if not rows:
+        abort(404)
+    stem = f"results_{_safe_stem(rows[0]['label'])}_{ihash[:8]}"
+    path = _save_pdf(_build_results_figure(ihash), stem)
+    flash(f"Saved {path.name} — see Saved figures.")
+    return redirect(url_for("results", ihash=ihash))
 
 
 @app.route("/analysis")
@@ -235,11 +284,11 @@ def analysis():
     return render_template("analysis.html", summaries=summaries)
 
 
-def _analysis_plot(y_field, y_label, title):
-    """Category-coloured PNG of `y_field` vs size_chars — one marked line per
+def _build_analysis_figure(y_field, y_label, title):
+    """Category-coloured plot of `y_field` vs size_chars — one marked line per
     category, so the trend across the size-graded samples is visible and not
     just the individual points. Shared by the /analysis/elbow.png and
-    /analysis/captured.png routes."""
+    /analysis/captured.png routes and their Save PDF counterparts."""
     conn = db.connect()
     summaries = db.get_all_summaries(conn)
     conn.close()
@@ -266,26 +315,80 @@ def _analysis_plot(y_field, y_label, title):
     if len(by_category) > 1:
         ax.legend()
     fig.tight_layout()
+    return fig
 
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=120)
-    plt.close(fig)
-    buf.seek(0)
-    return send_file(buf, mimetype="image/png")
+
+# The two cross-file plots differ only in which summary field they chart, so
+# their arguments live here and both the PNG and the Save PDF routes read them.
+ANALYSIS_PLOTS = {
+    "elbow": ("elbow_k", "Elbow k (BPE merges)", "Elbow k vs input size"),
+    "captured": ("pct_captured_at_elbow", "% of max utility captured at elbow",
+                 "Utility captured at elbow vs input size"),
+}
 
 
 @app.route("/analysis/elbow.png")
 def analysis_elbow_plot():
-    return _analysis_plot("elbow_k", "Elbow k (BPE merges)", "Elbow k vs input size")
+    return _serve_png(_build_analysis_figure(*ANALYSIS_PLOTS["elbow"]))
 
 
 @app.route("/analysis/captured.png")
 def analysis_captured_plot():
-    return _analysis_plot(
-        "pct_captured_at_elbow",
-        "% of max utility captured at elbow",
-        "Utility captured at elbow vs input size",
-    )
+    return _serve_png(_build_analysis_figure(*ANALYSIS_PLOTS["captured"]))
+
+
+@app.route("/save/analysis/<name>", methods=["POST"])
+def save_analysis_plot(name):
+    if name not in ANALYSIS_PLOTS:
+        abort(404)
+    path = _save_pdf(_build_analysis_figure(*ANALYSIS_PLOTS[name]), f"analysis_{name}")
+    flash(f"Saved {path.name} — see Saved figures.")
+    return redirect(url_for("analysis"))
+
+
+def _figure_path(name):
+    """Resolve a saved-figure filename to a path inside FIGURE_DIR.
+
+    `name` arrives from the URL, so it is checked twice: the pattern rules out
+    separators and traversal segments up front, and the resolved-parent check
+    catches anything that slips through (a symlink pointing out of the folder,
+    say). Anything else 404s rather than reaching the filesystem.
+    """
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+\.pdf", name):
+        abort(404)
+    path = FIGURE_DIR / name
+    if path.resolve().parent != FIGURE_DIR.resolve() or not path.is_file():
+        abort(404)
+    return path
+
+
+@app.route("/figures")
+def figures():
+    """Every PDF saved so far, newest first."""
+    saved = []
+    if FIGURE_DIR.is_dir():
+        for path in FIGURE_DIR.glob("*.pdf"):
+            stat = path.stat()
+            saved.append({
+                "name": path.name,
+                "mtime": stat.st_mtime,
+                "saved_at": datetime.fromtimestamp(stat.st_mtime).strftime("%d %b %Y, %H:%M"),
+                "size_kb": stat.st_size / 1024,
+            })
+        saved.sort(key=lambda f: f["mtime"], reverse=True)
+    return render_template("figures.html", figures=saved)
+
+
+@app.route("/figures/<name>")
+def figure_file(name):
+    return send_file(_figure_path(name), mimetype="application/pdf")
+
+
+@app.route("/figures/<name>/delete", methods=["POST"])
+def delete_figure(name):
+    _figure_path(name).unlink()
+    flash(f"Deleted {name}.")
+    return redirect(url_for("figures"))
 
 
 @app.route("/delete/<ihash>", methods=["POST"])
