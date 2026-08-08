@@ -56,11 +56,13 @@
       <button type="submit" formaction="{{ url_for('clean') }}">Clean</button>
       <button type="submit">Run BPE</button>
       <a class="button" href="{{ url_for('analysis') }}">Analysis</a>
+      <a class="button" href="{{ url_for('figures') }}">Saved figures</a>
     </div>
     <p class="muted"><strong>Clean</strong> applies the category's cleaning rules and
       shows you the result — it doesn't run BPE. <strong>Run BPE</strong> analyses the
       cleaned text if you've just cleaned, and the file or sample you picked otherwise.
-      <strong>Analysis</strong> opens the cross-file page comparing every input so far.</p>
+      <strong>Analysis</strong> opens the cross-file page comparing every input so far,
+      and <strong>Saved figures</strong> lists the PDFs saved from any graph.</p>
   </form>
 
   <h2>Stored inputs</h2>

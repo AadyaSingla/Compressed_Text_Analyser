@@ -731,14 +731,17 @@ nothing.
   (flex, pushed to opposite ends) instead of below it.
 - **`index.html`** — one form containing both input methods (file upload,
   sample dropdown), a required category radio group (Source code / English
-  language), the k and step fields, and three controls: **Clean** and
+  language), the k and step fields, and four controls: **Clean** and
   **Run BPE**, two submit buttons posting to two genuinely different
   endpoints (`/clean` and `/run`) via HTML's `formaction` attribute rather
   than sharing one endpoint distinguished by a value, so they read as the
-  separate actions they are; plus **Analysis**, which is a link to
-  `/analysis` styled as a button (`a.button`) rather than a submit — it
-  navigates, it doesn't act on the form, so it must not be able to submit
-  it. After a Clean, the page also shows the cleaned text in a read-only
+  separate actions they are; plus **Analysis** and **Saved figures**, which
+  are links to `/analysis` and `/figures` styled as buttons (`a.button`)
+  rather than submits — they navigate, they don't act on the form, so
+  neither must be able to submit it. Both pages are also in the header on
+  every page; the home-page buttons exist because the form is where you
+  start, and having to look up at the header to reach the results of what
+  you just ran reads as a dead end. After a Clean, the page also shows the cleaned text in a read-only
   `<pre>` (first 2,000 characters) with the full text and its label in
   hidden fields — read-only because the text is now machine-produced
   output to check, not something to keep editing, and hidden-field carriage
@@ -877,7 +880,9 @@ suite can never touch a real `experiments.db`.
    and how much of the available compression that elbow captures, plus both
    against input size as scatter plots. Every run adds to this page
    automatically — there's nothing extra to click.
-6. Click **Save PDF** next to any graph to keep a vector copy of it (see
+6. Click **Save PDF** next to any graph to keep a vector copy of it, and
+   **Saved figures** (button on the home page, or the header link on every
+   page) to get back to what you've saved (see
    [Saving figures](#saving-figures)).
 
 Limits: input up to 200,000 characters, k up to 2000.
