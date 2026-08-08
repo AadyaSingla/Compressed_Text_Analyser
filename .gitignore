@@ -5,3 +5,10 @@ __pycache__/
 .venv/
 experiments.db
 data/uploads/
+
+# The full source corpora the data/*_{10..40}k.txt samples are cut from.
+# Kept locally but out of the repo — english.txt alone is 6.3 MB, and nothing
+# in the app reads them: config.py only ever opens the pre-cut slices, which
+# are committed. Needed again only to re-cut the slices at new sizes.
+data/english.txt
+data/python.txt

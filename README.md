@@ -278,8 +278,8 @@ templates/
   analysis.html            Cross-file page: summary table + comparison plots
   figures.html             Saved-figures page: PDFs written by Save PDF
 data/
-  english.txt              Full English corpus the english_*k slices are cut from
-  python.txt               Full Python corpus the python_*k slices are cut from
+  english.txt              Full English corpus the slices are cut from (gitignored)
+  python.txt               Full Python corpus the slices are cut from (gitignored)
   english_10k.txt …_40k    Size-graded English samples (10k–40k chars, step 5k)
   python_10k.txt …_40k     Size-graded Python samples (same sizes)
   uploads/                 Copies of uploaded files (created on first upload)
@@ -782,6 +782,12 @@ and one source-code corpus (`python.txt`), at exact character lengths —
 come from `SAMPLE_SIZES` in `config.py` and the filenames are derived from
 it, so adding a size means adding a number there and cutting the matching
 file.
+
+The **slices are committed; the two full corpora they're cut from are not**
+(they're gitignored). `config.py` only ever opens the slices, so a fresh
+clone has everything the app runs on — `english.txt` and `python.txt` are
+needed only to cut a *new* size, and at 6.3 MB the English one is worth
+keeping out of the repo.
 
 Two things make this a usable experiment rather than just convenient demo
 data. First, prose vs. source code is the comparison the thesis cares about
