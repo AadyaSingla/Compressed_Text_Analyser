@@ -172,7 +172,8 @@ that before/after comparison:
 | **Merges applied** | `len(merges)` — the number of rounds that actually ran. | Shows whether the text hit its natural ceiling (rule 8) before reaching k. If this is below k, raising k further changes nothing for this text. |
 | **Chars** | `len(text)` — characters in the input. | The baseline. It's also the token count at k = 0, which anchors the utility at exactly 0. |
 | **Tokens** | `len(tokens)` — tokens remaining after all merges. | The direct measure of compression: every successful merge round removes one token per occurrence of the winning pair. |
-| **Vocab** | `len(set(tokens))` — number of *distinct* tokens in the final list. | The cost side of the trade-off. Compressing isn't free: each merge can add a new symbol you'd need in your "dictionary" to decode the text. Real tokenizers care about exactly this number. |
+| **Distinct tokens** | `len(set(tokens))` — how many *different* tokens appear in the final list. | What the text is actually built from at this k. It can go **down** as k rises: merging away every remaining `q` leaves that character unused, so the count drops even though the vocabulary you'd have to ship grew. |
+| **Learned vocab** | `len(set(text)) + len(merges)` — the starting alphabet plus one symbol per merge. | The cost side of the trade-off, and the honest one: every merge adds a symbol to the "dictionary" needed to decode the text, and that symbol stays in it whether or not the token still appears. This is the number real tokenizers quote as vocabulary size. |
 | **Utility** | `chars − tokens`, i.e. U(s,k) = \|s\| − \|s_k\| — the number of characters saved after k merges. | The headline number. 0 = untouched; higher means better compression. Always a non-negative whole number, and a *lossless* measure — the original text is always exactly recoverable from the tokens. |
 | **Longest token** | The longest string in the final vocabulary. | A qualitative window into what BPE learned. In prose it's usually a frequent word with its space (`the `); in code it can be a whole keyword or repeated snippet (`def `, `return `). |
 
@@ -186,8 +187,13 @@ utility-0 baseline), and stores every point so they can be compared:
 - **Utility vs k** rises steeply at first — the earliest merges grab the
   most frequent pairs, which save the most characters — then flattens as
   only rare pairs are left. Classic diminishing returns.
-- **Vocabulary vs k** climbs roughly one token per merge until the early
-  stop kicks in, then goes flat.
+- **Learned vocab vs k** climbs exactly one symbol per merge until the early
+  stop kicks in, then goes flat — a straight line, by construction.
+- **Distinct tokens vs k** tracks it at first, then peels away and can fall:
+  once merging consumes the last occurrence of a character, that character
+  stops appearing even though its symbol is still in the vocabulary. The gap
+  between the two lines is exactly the vocabulary you're paying for but no
+  longer using, which is why the results plot draws both.
 
 Read together, the two curves show the fundamental BPE trade-off: **you buy
 a shorter text by paying with a bigger vocabulary.** Comparing the curves of
@@ -233,10 +239,9 @@ text always gives the same elbow.
 | Field | Meaning |
 |---|---|
 | **`size_chars` / `size_words`** | Input size, the first thing any cross-file comparison has to control for. |
-| **`base_alphabet`** | Number of distinct characters — the vocabulary BPE starts from, before any merge. |
 | **`unique_words` / `type_token_ratio`** | Distinct words, and distinct ÷ total. A rough lexical-repetition measure that's independent of BPE, useful as a sanity check against what BPE finds. |
 | **`elbow_k`** | The knee: how many merges before returns visibly diminish. |
-| **`utility_at_elbow` / `tokens_at_elbow` / `vocab_at_elbow`** | The state of the text at that k — characters saved, tokens left, vocabulary size (`base_alphabet + elbow_k`). |
+| **`utility_at_elbow` / `tokens_at_elbow` / `learned_vocab_at_elbow`** | The state of the text at that k — characters saved, tokens left, and the learned vocabulary (base alphabet + `elbow_k`, since every merge adds one symbol). The base alphabet is computed where it's needed rather than stored as its own column — it's just `len(set(text))`, recoverable from the input at any time. |
 | **`max_utility`** | Utility at saturation — the most this text can ever be compressed by BPE. |
 | **`pct_captured_at_elbow`** | `utility_at_elbow ÷ max_utility`. **The headline number**: the share of all available compression you get for `elbow_k` merges instead of `saturation_k`. |
 | **`longest_token_at_elbow`** | The longest token learned by the elbow — a qualitative peek at *what* the useful merges actually captured. |
@@ -368,12 +373,12 @@ browser.
   incremental counters — but the naive version is simple to verify by hand
   and comfortably handles this app's 200k-char / k ≤ 2000 limits.
 
-- **`normalize_whitespace(text)` / `normalize_code(text)` / `normalize(text,
+- **`normalize_english(text)` / `normalize_code(text)` / `normalize(text,
   category)`** — cleaning rules that run before training, chosen by
   `category` rather than applied uniformly, because code and prose have
   different notions of "noise."
 
-  `normalize_whitespace` (`category="english"`) reduces the text to
+  `normalize_english` (`category="english"`) reduces the text to
   `[a-z0-9]` words separated by exactly one space: line endings become
   spaces (not removed — a line break is usually just wrapping, not
   meaningful structure, so words on either side of it must stay
@@ -426,7 +431,7 @@ browser.
 
 - **`analyse_series(text)`** — the whole utility curve in one pass: runs
   BPE from single characters and records a stats row (`k`, `token_count`,
-  `utility`, `active_types`, `learned_vocab`, `longest_token`) after every
+  `utility`, `distinct_tokens`, `learned_vocab`, `longest_token`) after every
   merge, stopping at the same natural point as `train_bpe`. It exists
   because the alternative — calling `analyse(text, k)` once per k — retrains
   from scratch every time, turning an O(k) walk into O(k²) work for a curve
@@ -630,12 +635,16 @@ these caps.
   disk). Building the figure and sending it are two functions, not one, so
   the same figure can also be written to disk as a PDF (see [Saving
   figures](#saving-figures)) without the two output formats ever drifting
-  apart. Two side-by-side matplotlib charts — compression utility vs k, and vocabulary size vs k — built with
+  apart. Two side-by-side matplotlib charts — compression utility vs k, and
+  the vocabulary pair (learned vocab solid, distinct tokens dashed, same
+  colour) vs k — built with
   `matplotlib.use("Agg")` set before `pyplot` is imported (the app runs
   headless; without this, Flask can crash on macOS). Rows are grouped by
   `category` first, so a hash with rows in both categories draws one line
   per category (with a legend), rather than one line zig-zagging between
-  two different curves. The figure's title carries the *only* place
+  two different curves. The vocabulary chart always carries a legend, since
+  it has two lines even for a single category — the utility chart still only
+  gets one when more than one category is present. The figure's title carries the *only* place
   "Cleaned"/"Raw" is mentioned anywhere in the UI — `rows[0]["cleaned"]`,
   since every row on one hash shares the same cleaned state (they're
   necessarily the same underlying text). Each figure is `plt.close()`d
@@ -752,7 +761,7 @@ nothing.
   `bpe.py` and stored by `db.py`, so the view layer can't introduce a
   discrepancy.
 - **`analysis.html`** — the cross-file page: one table row per stored
-  summary (category, size, elbow k, vocab at elbow, % utility captured,
+  summary (category, size, elbow k, learned vocab at elbow, % utility captured,
   longest token at elbow), then the two scatter plots. It shows a subset of
   the summary columns, not all of them — the rest are stored for querying
   the database directly, but a table wide enough to hold every field stops
@@ -826,7 +835,7 @@ perfectly plausible on screen.
 whose bend is known by construction (asserted as a range, since the method
 claims to find the bend *region*, not one exact index), its degenerate
 cases, and an internal-consistency check on `summarize()`
-(`vocab_at_elbow == base_alphabet + elbow_k`, `0 <= elbow_k <=
+(`learned_vocab_at_elbow == len(set(text)) + elbow_k`, `0 <= elbow_k <=
 saturation_k`, the captured percentage within [0, 1]). The BPE core itself
 isn't retested here — the [worked example](#worked-example) above pins it
 by hand.

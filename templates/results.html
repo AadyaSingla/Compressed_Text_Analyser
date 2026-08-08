@@ -9,12 +9,12 @@
   </div>
 
   <img class="plot" src="{{ url_for('plot', ihash=ihash) }}"
-       alt="Compression utility and vocabulary size vs k">
+       alt="Compression utility, and learned vocabulary vs distinct tokens, vs k">
 
   <table>
     <tr>
       <th class="num">k</th><th>Category</th><th class="num">Merges applied</th><th class="num">Chars</th>
-      <th class="num">Tokens</th><th class="num">Vocab</th>
+      <th class="num">Tokens</th><th class="num">Distinct tokens</th><th class="num">Learned vocab</th>
       <th class="num">Utility</th><th>Longest token</th>
     </tr>
     {% for r in rows %}
@@ -24,7 +24,8 @@
       <td class="num">{{ r['merges_applied'] }}</td>
       <td class="num">{{ r['original_chars'] }}</td>
       <td class="num">{{ r['token_count'] }}</td>
-      <td class="num">{{ r['vocab_size'] }}</td>
+      <td class="num">{{ r['distinct_tokens'] }}</td>
+      <td class="num">{{ r['learned_vocab'] }}</td>
       <td class="num">{{ r['utility'] }}</td>
       <td><code>{{ r['longest_token'] }}</code></td>
     </tr>

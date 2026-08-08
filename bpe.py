@@ -8,7 +8,7 @@ import re
 from collections import Counter
 
 
-def normalize_whitespace(text):
+def normalize_english(text):
     """Prose cleaning for category "english": newlines become spaces (word
     breaks, not structure), punctuation/symbols are stripped entirely,
     whitespace runs collapse to one space, and case is flattened. Word
@@ -45,7 +45,7 @@ def normalize_code(text):
 def normalize(text, category):
     """Dispatch to the category-appropriate cleaning rules."""
     if category == "english":
-        return normalize_whitespace(text)
+        return normalize_english(text)
     if category == "code":
         return normalize_code(text)
     raise ValueError(f"unknown category: {category!r}")
@@ -93,7 +93,7 @@ def analyse_series(text):
     twice), so it replaces calling analyse() once per k: a single pass
     yields the whole utility curve find_elbow_k() needs. Returns a list of
     dicts, one per k from 0 (the starting state) to the stop, each with:
-    k, token_count, utility, active_types, learned_vocab, longest_token.
+    k, token_count, utility, distinct_tokens, learned_vocab, longest_token.
     Pure — no I/O.
     """
     tokens = list(text)
@@ -104,7 +104,7 @@ def analyse_series(text):
             "k": k,
             "token_count": len(tokens),
             "utility": len(text) - len(tokens),
-            "active_types": len(set(tokens)),
+            "distinct_tokens": len(set(tokens)),
             "learned_vocab": base_alphabet + k,
             "longest_token": max((t for t in set(tokens)), key=len, default=""),
         }
@@ -172,13 +172,12 @@ def summarize(text, category, label):
         "category": category,
         "size_chars": len(text),
         "size_words": size_words,
-        "base_alphabet": base_alphabet,
         "unique_words": unique_words,
         "type_token_ratio": (unique_words / size_words) if size_words else 0.0,
         "elbow_k": elbow_k,
         "utility_at_elbow": elbow["utility"],
         "tokens_at_elbow": elbow["token_count"],
-        "vocab_at_elbow": base_alphabet + elbow_k,
+        "learned_vocab_at_elbow": base_alphabet + elbow_k,
         "max_utility": max_utility,
         "pct_captured_at_elbow": (elbow["utility"] / max_utility) if max_utility else 0.0,
         "longest_token_at_elbow": elbow["longest_token"],
@@ -195,13 +194,15 @@ def analyse(text, k):
     tokens, merges = train_bpe(text, k)
     original_len = len(text)
     token_count = len(tokens)
-    vocab_size = len(set(tokens))
+    distinct_tokens = len(set(tokens))
+    learned_vocab = len(set(text)) + len(merges)
     return {
         "k": k,
         "merges_applied": len(merges),
         "original_chars": original_len,
         "token_count": token_count,
-        "vocab_size": vocab_size,
+        "distinct_tokens": distinct_tokens,
+        "learned_vocab": learned_vocab,
         "utility": original_len - token_count,
         "longest_token": max((t for t in set(tokens)), key=len, default=""),
         "merges": merges,

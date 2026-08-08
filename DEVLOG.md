@@ -7,6 +7,55 @@ project evolves.)
 
 ---
 
+## 2026-08-08 — Vocabulary split into two numbers; clearer names
+
+- **`vocab_size` was one column doing two jobs.** It stored
+  `len(set(tokens))` — the distinct tokens *present after* merging — but the
+  UI labelled it "Vocab" and the README described it as the dictionary you'd
+  need to decode the text. Those aren't the same quantity, and they diverge:
+  once merging consumes the last occurrence of a character, that character
+  stops appearing while its symbol is still in the vocabulary. The old
+  column also isn't monotonic in k, which made "vocabulary grows as you
+  merge" — the trade-off the whole app exists to show — look false on the plot.
+
+- **Split into `distinct_tokens` and `learned_vocab`.**
+  `distinct_tokens = len(set(tokens))` is what the text is built from at
+  this k and may fall; `learned_vocab = len(set(text)) + len(merges)` is the
+  starting alphabet plus one symbol per merge, rises exactly one per merge,
+  and is the number tokenizers mean by "vocabulary size." Both are stored
+  per experiment row, and the results plot draws them together — learned
+  vocab solid, distinct tokens dashed, same colour per category — because
+  the *gap* between them is the point: it's vocabulary paid for but no
+  longer used. That chart now always gets a legend (it has two lines even
+  for one category), while the utility chart keeps the old
+  only-when-multiple-categories rule.
+
+- **`vocab_at_elbow` → `learned_vocab_at_elbow`** in `file_summary` and on
+  `/analysis`, for the same reason: it was always `base_alphabet + elbow_k`,
+  i.e. the learned vocabulary, never the distinct-token count.
+
+- **`base_alphabet` dropped as a stored column.** It's `len(set(text))` —
+  derivable from the input in one call, never independently interesting, and
+  a stored copy is one more thing that can go stale. It survives as a local
+  in `bpe.py` where it's used. `test_bpe.py`'s consistency assertion now
+  computes it directly instead of reading it back from the summary, which
+  makes the test check the invariant rather than a column against itself.
+
+- **Renames for accuracy**: `normalize_whitespace` → **`normalize_english`**
+  (it does far more than whitespace — strips punctuation, lowercases — and
+  the name now matches its sibling `normalize_code` and the `category`
+  values the dispatcher switches on), and the series field `active_types` →
+  **`distinct_tokens`**, matching the experiment column and dropping the
+  "types" jargon.
+
+- **Migration: `experiments.db` was deleted, not migrated.** `CREATE TABLE
+  IF NOT EXISTS` won't add or drop columns on an existing table, and this
+  changes both tables. The data was 195 rows over 9 bundled samples, all
+  reproducible by re-running (BPE is deterministic), so recreating beat
+  writing a migration for local, disposable experiment data — same drill as
+  every schema change before this. Anyone with an older database needs the
+  same `rm experiments.db`.
+
 ## 2026-08-08 — Save PDF on every graph, a saved-figures page, and samples up to 40k
 
 - **Why**: the graphs were only ever pixels in a browser tab. Getting one

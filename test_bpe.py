@@ -27,9 +27,8 @@ def test_summarize_on_short_string():
     summary = bpe.summarize(text, "english", "short-test")
     assert summary["size_chars"] == len(text)
     assert summary["size_words"] == 9
-    assert summary["base_alphabet"] == len(set(text))
     assert 0 <= summary["elbow_k"] <= summary["saturation_k"]
-    assert summary["vocab_at_elbow"] == summary["base_alphabet"] + summary["elbow_k"]
+    assert summary["learned_vocab_at_elbow"] == len(set(text)) + summary["elbow_k"]
     assert 0.0 <= summary["pct_captured_at_elbow"] <= 1.0
     assert summary["max_utility"] >= summary["utility_at_elbow"] >= 0
 

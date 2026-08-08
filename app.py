@@ -215,7 +215,7 @@ def _safe_stem(label):
 
 
 def _build_results_figure(ihash):
-    """Compression utility and vocabulary size vs k. One line per category
+    """Compression utility, and learned vocabulary vs distinct tokens, vs k. One line per category
     if a hash has rows from more than one (still possible — category,
     unlike cleaned, stays part of an experiment's identity)."""
     conn = db.connect()
@@ -234,7 +234,10 @@ def _build_results_figure(ihash):
         ks = [r["k"] for r in crows]
         color = colors.get(category)
         ax1.plot(ks, [r["utility"] for r in crows], marker="o", label=category, color=color)
-        ax2.plot(ks, [r["vocab_size"] for r in crows], marker="o", label=category, color=color)
+        ax2.plot(ks, [r["learned_vocab"] for r in crows], marker="o",
+                 label=f"{category} — learned vocab (memory)", color=color)
+        ax2.plot(ks, [r["distinct_tokens"] for r in crows], marker="o", linestyle="--",
+                 label=f"{category} — distinct tokens", color=color)
 
     ax1.set_xlabel("k (BPE merges)")
     ax1.set_ylabel("Compression utility (|s| - |s_k|), characters saved")
@@ -242,13 +245,13 @@ def _build_results_figure(ihash):
     ax1.grid(True, alpha=0.3)
 
     ax2.set_xlabel("k (BPE merges)")
-    ax2.set_ylabel("Vocabulary size")
-    ax2.set_title("Vocabulary size vs k")
+    ax2.set_ylabel("Vocabulary (tokens)")
+    ax2.set_title("Learned vocabulary & distinct tokens vs k")
     ax2.grid(True, alpha=0.3)
 
+    ax2.legend(fontsize=8)
     if len(by_category) > 1:
         ax1.legend()
-        ax2.legend()
 
     status_word = "Cleaned" if rows[0]["cleaned"] else "Raw"
     fig.suptitle(f"{rows[0]['label']} — {status_word}")

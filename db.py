@@ -23,7 +23,8 @@ CREATE TABLE IF NOT EXISTS experiments (
     merges_applied INTEGER NOT NULL,
     original_chars INTEGER NOT NULL,
     token_count INTEGER NOT NULL,
-    vocab_size INTEGER NOT NULL,
+    distinct_tokens INTEGER NOT NULL,
+    learned_vocab INTEGER NOT NULL,
     utility INTEGER NOT NULL,
     longest_token TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -37,13 +38,12 @@ CREATE TABLE IF NOT EXISTS file_summary (
     category TEXT NOT NULL CHECK (category IN ('code', 'english')),
     size_chars INTEGER NOT NULL,
     size_words INTEGER NOT NULL,
-    base_alphabet INTEGER NOT NULL,
     unique_words INTEGER NOT NULL,
     type_token_ratio REAL NOT NULL,
     elbow_k INTEGER NOT NULL,
     utility_at_elbow INTEGER NOT NULL,
     tokens_at_elbow INTEGER NOT NULL,
-    vocab_at_elbow INTEGER NOT NULL,
+    learned_vocab_at_elbow INTEGER NOT NULL,
     max_utility INTEGER NOT NULL,
     pct_captured_at_elbow REAL NOT NULL,
     longest_token_at_elbow TEXT NOT NULL,
@@ -85,8 +85,8 @@ def save_experiment(conn, label, category, cleaned, text, stats):
     conn.execute(
         """INSERT INTO experiments
            (label, category, cleaned, input_hash, input_string, k, merges_applied,
-            original_chars, token_count, vocab_size, utility, longest_token)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            original_chars, token_count, distinct_tokens, learned_vocab, utility, longest_token)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             label,
             category,
@@ -97,7 +97,8 @@ def save_experiment(conn, label, category, cleaned, text, stats):
             stats["merges_applied"],
             stats["original_chars"],
             stats["token_count"],
-            stats["vocab_size"],
+            stats["distinct_tokens"],
+            stats["learned_vocab"],
             stats["utility"],
             stats["longest_token"],
         ),
@@ -137,24 +138,23 @@ def save_summary(conn, ihash, summary):
     re-running a file's analysis refreshes its cross-file summary."""
     conn.execute(
         """INSERT OR REPLACE INTO file_summary
-           (input_hash, label, category, size_chars, size_words, base_alphabet,
+           (input_hash, label, category, size_chars, size_words,
             unique_words, type_token_ratio, elbow_k, utility_at_elbow,
-            tokens_at_elbow, vocab_at_elbow, max_utility, pct_captured_at_elbow,
+            tokens_at_elbow, learned_vocab_at_elbow, max_utility, pct_captured_at_elbow,
             longest_token_at_elbow, saturation_k)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             ihash,
             summary["label"],
             summary["category"],
             summary["size_chars"],
             summary["size_words"],
-            summary["base_alphabet"],
             summary["unique_words"],
             summary["type_token_ratio"],
             summary["elbow_k"],
             summary["utility_at_elbow"],
             summary["tokens_at_elbow"],
-            summary["vocab_at_elbow"],
+            summary["learned_vocab_at_elbow"],
             summary["max_utility"],
             summary["pct_captured_at_elbow"],
             summary["longest_token_at_elbow"],
