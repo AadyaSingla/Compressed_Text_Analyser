@@ -8,7 +8,7 @@
   {% if summaries %}
   <table>
     <tr>
-      <th>File</th><th>Category</th><th class="num">Chars</th><th class="num">Words</th>
+      <th>File</th><th>Category</th><th class="num">Chars</th>
       <th class="num">Elbow k</th><th class="num">Learned vocab @ elbow</th>
       <th class="num">% utility captured</th><th>Longest token @ elbow</th>
     </tr>
@@ -17,7 +17,6 @@
       <td>{{ s['label'] }}</td>
       <td>{{ s['category'] }}</td>
       <td class="num">{{ s['size_chars'] }}</td>
-      <td class="num">{{ s['size_words'] }}</td>
       <td class="num">{{ s['elbow_k'] }}</td>
       <td class="num">{{ s['learned_vocab_at_elbow'] }}</td>
       <td class="num">{{ "%.1f"|format(s['pct_captured_at_elbow'] * 100) }}%</td>

@@ -7,6 +7,30 @@ project evolves.)
 
 ---
 
+## 2026-08-08 — Word-count fields dropped from the summary
+
+- **`size_words`, `unique_words`, and `type_token_ratio` are gone** from
+  `summarize()`, the `file_summary` table, and the `/analysis` table. They
+  were added as a BPE-independent sanity check on lexical repetition, but
+  nothing in the app ever read them: no plot uses them, the elbow doesn't
+  depend on them, and no analysis was ever written against them. A stored
+  column that nothing consumes still has to be kept correct on every write,
+  so it's a liability rather than an option held open.
+
+- **`size_chars` stays** and remains the x-axis of both cross-file plots.
+  Characters are the right size measure here anyway — BPE operates on
+  characters, and `text.split()` means something quite different for prose
+  than for source code, so a word count was never comparable across the two
+  categories the app exists to compare.
+
+- **Migration**: another `file_summary` shape change, so `experiments.db`
+  was deleted and recreated again. `db.py` now carries a comment at the
+  `SCHEMA` definition stating the rule once — `CREATE TABLE IF NOT EXISTS`
+  never alters an existing table, so any column change here means deleting
+  the database — with this drop recorded as the instance. A database from
+  before this change still has the three columns and will fail on
+  `save_summary`'s INSERT, since they're `NOT NULL` with no default.
+
 ## 2026-08-08 — Vocabulary split into two numbers; clearer names
 
 - **`vocab_size` was one column doing two jobs.** It stored

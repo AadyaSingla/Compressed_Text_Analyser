@@ -161,9 +161,6 @@ def summarize(text, category, label):
     elbow = series[elbow_k]
     saturation = series[-1]
 
-    words = text.split()
-    size_words = len(words)
-    unique_words = len(set(words))
     base_alphabet = len(set(text))
     max_utility = saturation["utility"]
 
@@ -171,9 +168,6 @@ def summarize(text, category, label):
         "label": label,
         "category": category,
         "size_chars": len(text),
-        "size_words": size_words,
-        "unique_words": unique_words,
-        "type_token_ratio": (unique_words / size_words) if size_words else 0.0,
         "elbow_k": elbow_k,
         "utility_at_elbow": elbow["utility"],
         "tokens_at_elbow": elbow["token_count"],

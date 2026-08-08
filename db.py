@@ -11,6 +11,11 @@ from pathlib import Path
 
 DB_PATH = Path(__file__).parent / "experiments.db"
 
+# CREATE TABLE IF NOT EXISTS never alters an existing table, so any change to
+# the columns below needs experiments.db deleted and recreated — it won't be
+# migrated in place. Done for the file_summary word-count columns
+# (size_words, unique_words, type_token_ratio), dropped 2026-08-08; a database
+# from before then still has them and will fail on save_summary's INSERT.
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS experiments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -37,9 +42,6 @@ CREATE TABLE IF NOT EXISTS file_summary (
     label TEXT NOT NULL,
     category TEXT NOT NULL CHECK (category IN ('code', 'english')),
     size_chars INTEGER NOT NULL,
-    size_words INTEGER NOT NULL,
-    unique_words INTEGER NOT NULL,
-    type_token_ratio REAL NOT NULL,
     elbow_k INTEGER NOT NULL,
     utility_at_elbow INTEGER NOT NULL,
     tokens_at_elbow INTEGER NOT NULL,
@@ -138,19 +140,15 @@ def save_summary(conn, ihash, summary):
     re-running a file's analysis refreshes its cross-file summary."""
     conn.execute(
         """INSERT OR REPLACE INTO file_summary
-           (input_hash, label, category, size_chars, size_words,
-            unique_words, type_token_ratio, elbow_k, utility_at_elbow,
+           (input_hash, label, category, size_chars, elbow_k, utility_at_elbow,
             tokens_at_elbow, learned_vocab_at_elbow, max_utility, pct_captured_at_elbow,
             longest_token_at_elbow, saturation_k)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             ihash,
             summary["label"],
             summary["category"],
             summary["size_chars"],
-            summary["size_words"],
-            summary["unique_words"],
-            summary["type_token_ratio"],
             summary["elbow_k"],
             summary["utility_at_elbow"],
             summary["tokens_at_elbow"],

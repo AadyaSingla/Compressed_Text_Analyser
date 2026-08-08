@@ -238,8 +238,7 @@ text always gives the same elbow.
 
 | Field | Meaning |
 |---|---|
-| **`size_chars` / `size_words`** | Input size, the first thing any cross-file comparison has to control for. |
-| **`unique_words` / `type_token_ratio`** | Distinct words, and distinct ÷ total. A rough lexical-repetition measure that's independent of BPE, useful as a sanity check against what BPE finds. |
+| **`size_chars`** | Input size, the first thing any cross-file comparison has to control for — and the x-axis of both plots below. Characters, not words: BPE operates on characters, and a word count means something different for prose than for code. |
 | **`elbow_k`** | The knee: how many merges before returns visibly diminish. |
 | **`utility_at_elbow` / `tokens_at_elbow` / `learned_vocab_at_elbow`** | The state of the text at that k — characters saved, tokens left, and the learned vocabulary (base alphabet + `elbow_k`, since every merge adds one symbol). The base alphabet is computed where it's needed rather than stored as its own column — it's just `len(set(text))`, recoverable from the input at any time. |
 | **`max_utility`** | Utility at saturation — the most this text can ever be compressed by BPE. |
