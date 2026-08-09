@@ -279,7 +279,7 @@ def save_results_plot(ihash):
 
 @app.route("/analysis")
 def analysis():
-    """Cross-file summary: one row per analysed input, with elbow-point
+    """Cross-file summary: one row per analysed input, with knee-point
     stats, plus links to the two comparison plots."""
     conn = db.connect()
     summaries = db.get_all_summaries(conn)
@@ -290,7 +290,7 @@ def analysis():
 def _build_analysis_figure(y_field, y_label, title):
     """Category-coloured plot of `y_field` vs size_chars — one marked line per
     category, so the trend across the size-graded samples is visible and not
-    just the individual points. Shared by the /analysis/elbow.png and
+    just the individual points. Shared by the /analysis/knee.png and
     /analysis/captured.png routes and their Save PDF counterparts."""
     conn = db.connect()
     summaries = db.get_all_summaries(conn)
@@ -324,15 +324,15 @@ def _build_analysis_figure(y_field, y_label, title):
 # The two cross-file plots differ only in which summary field they chart, so
 # their arguments live here and both the PNG and the Save PDF routes read them.
 ANALYSIS_PLOTS = {
-    "elbow": ("elbow_k", "Elbow k (BPE merges)", "Elbow k vs input size"),
-    "captured": ("pct_captured_at_elbow", "% of max utility captured at elbow",
-                 "Utility captured at elbow vs input size"),
+    "knee": ("knee_k", "Knee k (BPE merges)", "Knee k vs input size"),
+    "captured": ("pct_captured_at_knee", "% of max utility captured at knee",
+                 "Utility captured at knee vs input size"),
 }
 
 
-@app.route("/analysis/elbow.png")
-def analysis_elbow_plot():
-    return _serve_png(_build_analysis_figure(*ANALYSIS_PLOTS["elbow"]))
+@app.route("/analysis/knee.png")
+def analysis_knee_plot():
+    return _serve_png(_build_analysis_figure(*ANALYSIS_PLOTS["knee"]))
 
 
 @app.route("/analysis/captured.png")

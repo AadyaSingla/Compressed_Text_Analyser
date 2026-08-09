@@ -7,12 +7,54 @@ project evolves.)
 
 ---
 
+## 2026-08-09 — Longest-token metric removed
+
+- **`longest_token` / `longest_token_at_knee` are gone** from `analyse()`,
+  `analyse_series()`, `summarize()`, both database tables, and the
+  `/results` and `/analysis` tables. It was the one purely qualitative
+  number in an otherwise quantitative set: nothing plots it, the knee
+  doesn't depend on it, and a single longest string says little about a
+  vocabulary — ties are broken arbitrarily by `max()`, so which token
+  appeared was partly an artifact of set iteration order. The quantitative
+  vocabulary story is already told by `distinct_tokens` and
+  `learned_vocab`.
+
+- **Migration**: dropping columns is expressible as `ALTER TABLE ... DROP
+  COLUMN`, so the existing `experiments.db` was migrated in place (backup
+  at `experiments.db.pre-longest-token-drop.bak`) rather than deleted — all
+  190 experiment rows and 14 summary rows are unchanged. A database that
+  has not had the drops applied still has both columns declared `NOT NULL`
+  with no default, so it will fail on `save_experiment`'s and
+  `save_summary`'s INSERTs.
+
+---
+
+## 2026-08-09 — "Elbow" renamed to "knee" throughout
+
+- **One name for one concept.** The code called the bend in the utility
+  curve the *elbow* while the method it uses is published as the *knee* /
+  Kneedle method, and the docs used both words interchangeably. Everything
+  is now *knee*: `find_knee_k()`, the `knee_k` / `*_at_knee` summary fields
+  and `file_summary` columns, the `/analysis/knee.png` route and
+  `analysis_knee_plot()`, the `"knee"` key in `ANALYSIS_PLOTS` (and so the
+  `/save/analysis/knee` URL and the `analysis_knee.pdf` filename), the
+  `/analysis` table headers, and the prose in this log and the README.
+
+- **Migration**: renaming columns is a `file_summary` shape change, but this
+  one is expressible as `ALTER TABLE ... RENAME COLUMN`, so the existing
+  `experiments.db` was migrated in place with the six renames rather than
+  deleted — the stored rows are unchanged, only the labels on them moved.
+  A database that has not had those renames applied still has the `elbow_*`
+  names and will fail on `save_summary`'s INSERT.
+
+---
+
 ## 2026-08-08 — Word-count fields dropped from the summary
 
 - **`size_words`, `unique_words`, and `type_token_ratio` are gone** from
   `summarize()`, the `file_summary` table, and the `/analysis` table. They
   were added as a BPE-independent sanity check on lexical repetition, but
-  nothing in the app ever read them: no plot uses them, the elbow doesn't
+  nothing in the app ever read them: no plot uses them, the knee doesn't
   depend on them, and no analysis was ever written against them. A stored
   column that nothing consumes still has to be kept correct on every write,
   so it's a liability rather than an option held open.
@@ -54,8 +96,8 @@ project evolves.)
   for one category), while the utility chart keeps the old
   only-when-multiple-categories rule.
 
-- **`vocab_at_elbow` → `learned_vocab_at_elbow`** in `file_summary` and on
-  `/analysis`, for the same reason: it was always `base_alphabet + elbow_k`,
+- **`vocab_at_knee` → `learned_vocab_at_knee`** in `file_summary` and on
+  `/analysis`, for the same reason: it was always `base_alphabet + knee_k`,
   i.e. the learned vocabulary, never the distinct-token count.
 
 - **`base_alphabet` dropped as a stored column.** It's `len(set(text))` —
@@ -100,13 +142,13 @@ project evolves.)
   by construction: every route ends in exactly one of them.
 
 - **The two cross-file plots' arguments moved into an `ANALYSIS_PLOTS` dict**
-  keyed `"elbow"` / `"captured"`. There were two routes over one helper before;
+  keyed `"knee"` / `"captured"`. There were two routes over one helper before;
   adding Save PDF would have made it four routes repeating the same three
   literal arguments. Now the URL segment *is* the key (`POST
   /save/analysis/<name>`), and a third cross-file plot would be one dict entry
   plus one PNG route.
 
-- **Stable filenames, so re-saving replaces.** `analysis_elbow.pdf`,
+- **Stable filenames, so re-saving replaces.** `analysis_knee.pdf`,
   `analysis_captured.pdf`, and `results_<label>_<hash8>.pdf`. The alternative
   — timestamped names — accumulates six near-identical PDFs of the same graph
   after a few re-runs and leaves you picking the newest by eye; overwriting
@@ -134,7 +176,7 @@ project evolves.)
 - **Samples extended to 30k, 35k, and 40k** — `SAMPLE_SIZES` grew by three
   entries and six new slices were cut, same non-overlapping-consecutive rule
   as the existing ones, so a category still varies only in size. Four points
-  per category was thin for reading a trend off the elbow-vs-size plot;
+  per category was thin for reading a trend off the knee-vs-size plot;
   seven gives the line something to be.
 
 - **`_sample_names()` replaces `sorted(SAMPLES)` for the dropdown.** Plain
@@ -205,7 +247,7 @@ project evolves.)
   `POST /api/experiments` able to analyse nothing but the two bundled
   samples.
 
-## 2026-08-05 — Elbow detection, a per-file summary table, and a cross-file analysis page
+## 2026-08-05 — Knee detection, a per-file summary table, and a cross-file analysis page
 
 - **Why**: everything the app did up to here answered a *within-one-input*
   question — "how does this text compress as k grows" — and answered it as
@@ -214,7 +256,7 @@ project evolves.)
   themselves) was never computed, only visible. Second, there was no way to
   put inputs next to each other: comparing prose against code, or short
   against long, meant opening two results pages and squinting. This change
-  adds a single scalar per input — the **elbow k** — and a page that plots
+  adds a single scalar per input — the **knee k** — and a page that plots
   it across every input analysed so far, which is what turns a pile of
   individual runs into an actual cross-file finding.
 
@@ -224,12 +266,12 @@ project evolves.)
   obvious way to get the utility curve — calling `analyse(text, k)` for
   every k — retrains from scratch each time, i.e. O(k²) work for a curve
   the single pass already walks through. It also gives the curve at *every*
-  k rather than only at the sweep's step points, which matters: the elbow
+  k rather than only at the sweep's step points, which matters: the knee
   is a specific k, and a sweep with step 50 could only ever locate it to
   the nearest 50. Returns k = 0 (the untouched character list) as the first
   row, so the series always has a utility-0 baseline like the sweep does.
 
-- **`bpe.find_elbow_k(utilities)`** — the knee / distance-to-chord method
+- **`bpe.find_knee_k(utilities)`** — the knee / distance-to-chord method
   (Satopaa et al., 2011, *Finding a "Kneedle" in a Haystack*): normalize
   both axes to [0, 1] and take the k whose point sits farthest **above**
   the straight chord from (0, 0) to (1, 1). Chosen over curvature/second-
@@ -245,12 +287,12 @@ project evolves.)
 
 - **`bpe.summarize(text, category, label)`** — glues the two together into
   the flat dict `db.save_summary()` stores: size stats (chars, words,
-  base alphabet, unique words, type/token ratio), the elbow point (k,
+  base alphabet, unique words, type/token ratio), the knee point (k,
   utility, tokens, vocab, longest token there), the saturation k, and
-  **`pct_captured_at_elbow`** — the elbow's utility as a fraction of the
+  **`pct_captured_at_knee`** — the knee's utility as a fraction of the
   maximum achievable utility. That last one is the number worth reading:
   it says "you get X% of all the compression this text will ever give you,
-  for `elbow_k` merges instead of `saturation_k`." Same convention as
+  for `knee_k` merges instead of `saturation_k`." Same convention as
   `analyse()`: the caller normalizes the text first, `summarize()` has no
   opinion on cleaning.
 
@@ -264,8 +306,8 @@ project evolves.)
   it is always correct.
 
 - **`/analysis`** renders one row per stored summary, plus two scatter
-  plots served by `/analysis/elbow.png` (elbow k vs input size) and
-  `/analysis/captured.png` (% of max utility captured at the elbow vs input
+  plots served by `/analysis/knee.png` (knee k vs input size) and
+  `/analysis/captured.png` (% of max utility captured at the knee vs input
   size). Both come from one helper, `_analysis_scatter(y_field, y_label,
   title)`, since they differ only in which column goes on the y-axis. Points
   are coloured by category using **the same two colours as the per-input
@@ -273,19 +315,19 @@ project evolves.)
   moving between the two pages doesn't have to relearn the mapping, and the
   legend is drawn only when more than one category is present — same rule
   `plot()` already used. Input size is the x-axis on both because it's the
-  confound worth ruling out first: if elbow k just tracks length, that's not
+  confound worth ruling out first: if knee k just tracks length, that's not
   a finding about prose vs code.
 
 - **First tests in the project (`test_bpe.py`)** — plain asserts and a
   `__main__` block, run with `.venv/bin/python test_bpe.py`, no pytest
   dependency added. They cover exactly the parts where a silent wrong
-  answer would be invisible in the UI: `find_elbow_k` on a hand-built
+  answer would be invisible in the UI: `find_knee_k` on a hand-built
   concave curve whose bend is known by construction (asserted as a range,
   `2 <= k <= 4`, not an exact k — pinning the precise index would make the
   test a change-detector for a method that only claims to find the bend
   *region*), its degenerate cases, and an internal-consistency check on
-  `summarize()` for a short real string (`vocab_at_elbow` = alphabet +
-  elbow k, `0 <= elbow_k <= saturation_k`, the percentage in [0, 1]). The
+  `summarize()` for a short real string (`vocab_at_knee` = alphabet +
+  knee k, `0 <= knee_k <= saturation_k`, the percentage in [0, 1]). The
   BPE core itself stays untested here — it's already pinned by the worked
   example in the README.
 

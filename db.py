@@ -16,6 +16,11 @@ DB_PATH = Path(__file__).parent / "experiments.db"
 # migrated in place. Done for the file_summary word-count columns
 # (size_words, unique_words, type_token_ratio), dropped 2026-08-08; a database
 # from before then still has them and will fail on save_summary's INSERT.
+# Same again for the file_summary knee columns, renamed from elbow_* to knee_*
+# on 2026-08-09; a database from before then still has the elbow_* names.
+# Same again for the longest-token columns (experiments.longest_token,
+# file_summary.longest_token_at_knee), dropped 2026-08-09; a database from
+# before then still has them declared NOT NULL and will fail on insert.
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS experiments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -31,7 +36,6 @@ CREATE TABLE IF NOT EXISTS experiments (
     distinct_tokens INTEGER NOT NULL,
     learned_vocab INTEGER NOT NULL,
     utility INTEGER NOT NULL,
-    longest_token TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (input_string, k, category)
 );
@@ -42,13 +46,12 @@ CREATE TABLE IF NOT EXISTS file_summary (
     label TEXT NOT NULL,
     category TEXT NOT NULL CHECK (category IN ('code', 'english')),
     size_chars INTEGER NOT NULL,
-    elbow_k INTEGER NOT NULL,
-    utility_at_elbow INTEGER NOT NULL,
-    tokens_at_elbow INTEGER NOT NULL,
-    learned_vocab_at_elbow INTEGER NOT NULL,
+    knee_k INTEGER NOT NULL,
+    utility_at_knee INTEGER NOT NULL,
+    tokens_at_knee INTEGER NOT NULL,
+    learned_vocab_at_knee INTEGER NOT NULL,
     max_utility INTEGER NOT NULL,
-    pct_captured_at_elbow REAL NOT NULL,
-    longest_token_at_elbow TEXT NOT NULL,
+    pct_captured_at_knee REAL NOT NULL,
     saturation_k INTEGER NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (input_hash, category)
@@ -87,8 +90,8 @@ def save_experiment(conn, label, category, cleaned, text, stats):
     conn.execute(
         """INSERT INTO experiments
            (label, category, cleaned, input_hash, input_string, k, merges_applied,
-            original_chars, token_count, distinct_tokens, learned_vocab, utility, longest_token)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            original_chars, token_count, distinct_tokens, learned_vocab, utility)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             label,
             category,
@@ -102,7 +105,6 @@ def save_experiment(conn, label, category, cleaned, text, stats):
             stats["distinct_tokens"],
             stats["learned_vocab"],
             stats["utility"],
-            stats["longest_token"],
         ),
     )
     conn.commit()
@@ -140,22 +142,21 @@ def save_summary(conn, ihash, summary):
     re-running a file's analysis refreshes its cross-file summary."""
     conn.execute(
         """INSERT OR REPLACE INTO file_summary
-           (input_hash, label, category, size_chars, elbow_k, utility_at_elbow,
-            tokens_at_elbow, learned_vocab_at_elbow, max_utility, pct_captured_at_elbow,
-            longest_token_at_elbow, saturation_k)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           (input_hash, label, category, size_chars, knee_k, utility_at_knee,
+            tokens_at_knee, learned_vocab_at_knee, max_utility, pct_captured_at_knee,
+            saturation_k)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             ihash,
             summary["label"],
             summary["category"],
             summary["size_chars"],
-            summary["elbow_k"],
-            summary["utility_at_elbow"],
-            summary["tokens_at_elbow"],
-            summary["learned_vocab_at_elbow"],
+            summary["knee_k"],
+            summary["utility_at_knee"],
+            summary["tokens_at_knee"],
+            summary["learned_vocab_at_knee"],
             summary["max_utility"],
-            summary["pct_captured_at_elbow"],
-            summary["longest_token_at_elbow"],
+            summary["pct_captured_at_knee"],
             summary["saturation_k"],
         ),
     )

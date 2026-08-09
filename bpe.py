@@ -67,8 +67,7 @@ def _merge_pair(tokens, pair):
 
 
 def train_bpe(text, k):
-    """Run up to k BPE merges on `text` starting from single characters.
-
+    """Run up to k BPE merges on `text` starting from single characters
     Returns (tokens, merges) where merges is the ordered list of pairs
     that were merged. Stops early if no pair occurs at least twice.
     """
@@ -91,9 +90,9 @@ def analyse_series(text):
 
     Stops at the same natural point as train_bpe (no pair occurs at least
     twice), so it replaces calling analyse() once per k: a single pass
-    yields the whole utility curve find_elbow_k() needs. Returns a list of
+    yields the whole utility curve find_knee_k() needs. Returns a list of
     dicts, one per k from 0 (the starting state) to the stop, each with:
-    k, token_count, utility, distinct_tokens, learned_vocab, longest_token.
+    k, token_count, utility, distinct_tokens, learned_vocab.
     Pure — no I/O.
     """
     tokens = list(text)
@@ -106,7 +105,6 @@ def analyse_series(text):
             "utility": len(text) - len(tokens),
             "distinct_tokens": len(set(tokens)),
             "learned_vocab": base_alphabet + k,
-            "longest_token": max((t for t in set(tokens)), key=len, default=""),
         }
 
     series = [_record(0, tokens)]
@@ -122,7 +120,7 @@ def analyse_series(text):
     return series
 
 
-def find_elbow_k(utilities):
+def find_knee_k(utilities):
     """Return the k that best trades off compression against merge count.
 
     `utilities` is indexed by k (utility after k merges), k=0..saturation.
@@ -149,16 +147,16 @@ def find_elbow_k(utilities):
 
 def summarize(text, category, label):
     """Summarize one file's BPE behaviour as a single flat dict: size
-    stats plus the elbow point (the k of diminishing returns).
+    stats plus the knee point (the k of diminishing returns).
 
     `text` must already be normalized by the caller, same convention as
-    analyse(). Combines analyse_series() and find_elbow_k() into the row
+    analyse(). Combines analyse_series() and find_knee_k() into the row
     shape stored by db.save_summary().
     """
     series = analyse_series(text)
     utilities = [r["utility"] for r in series]
-    elbow_k = find_elbow_k(utilities)
-    elbow = series[elbow_k]
+    knee_k = find_knee_k(utilities)
+    knee = series[knee_k]
     saturation = series[-1]
 
     base_alphabet = len(set(text))
@@ -168,13 +166,12 @@ def summarize(text, category, label):
         "label": label,
         "category": category,
         "size_chars": len(text),
-        "elbow_k": elbow_k,
-        "utility_at_elbow": elbow["utility"],
-        "tokens_at_elbow": elbow["token_count"],
-        "learned_vocab_at_elbow": base_alphabet + elbow_k,
+        "knee_k": knee_k,
+        "utility_at_knee": knee["utility"],
+        "tokens_at_knee": knee["token_count"],
+        "learned_vocab_at_knee": base_alphabet + knee_k,
         "max_utility": max_utility,
-        "pct_captured_at_elbow": (elbow["utility"] / max_utility) if max_utility else 0.0,
-        "longest_token_at_elbow": elbow["longest_token"],
+        "pct_captured_at_knee": (knee["utility"] / max_utility) if max_utility else 0.0,
         "saturation_k": saturation["k"],
     }
 
@@ -198,6 +195,5 @@ def analyse(text, k):
         "distinct_tokens": distinct_tokens,
         "learned_vocab": learned_vocab,
         "utility": original_len - token_count,
-        "longest_token": max((t for t in set(tokens)), key=len, default=""),
         "merges": merges,
     }

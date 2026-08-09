@@ -3,45 +3,44 @@
 {% block content %}
   <h2>Cross-file analysis</h2>
   <p class="muted">One row per analysed input, summarizing where its BPE utility
-    curve elbows — the point of diminishing returns for adding more merges.</p>
+    curve bends — the point of diminishing returns for adding more merges.</p>
 
   {% if summaries %}
   <table>
     <tr>
       <th>File</th><th>Category</th><th class="num">Chars</th>
-      <th class="num">Elbow k</th><th class="num">Learned vocab @ elbow</th>
-      <th class="num">% utility captured</th><th>Longest token @ elbow</th>
+      <th class="num">Knee k</th><th class="num">Learned vocab @ knee</th>
+      <th class="num">% utility captured</th>
     </tr>
     {% for s in summaries %}
     <tr>
       <td>{{ s['label'] }}</td>
       <td>{{ s['category'] }}</td>
       <td class="num">{{ s['size_chars'] }}</td>
-      <td class="num">{{ s['elbow_k'] }}</td>
-      <td class="num">{{ s['learned_vocab_at_elbow'] }}</td>
-      <td class="num">{{ "%.1f"|format(s['pct_captured_at_elbow'] * 100) }}%</td>
-      <td><code>{{ s['longest_token_at_elbow'] }}</code></td>
+      <td class="num">{{ s['knee_k'] }}</td>
+      <td class="num">{{ s['learned_vocab_at_knee'] }}</td>
+      <td class="num">{{ "%.1f"|format(s['pct_captured_at_knee'] * 100) }}%</td>
     </tr>
     {% endfor %}
   </table>
 
   <div class="plot-head">
-    <h2>Elbow k vs input size</h2>
-    <form method="post" action="{{ url_for('save_analysis_plot', name='elbow') }}">
+    <h2>Knee k vs input size</h2>
+    <form method="post" action="{{ url_for('save_analysis_plot', name='knee') }}">
       <button class="small" type="submit">Save PDF</button>
     </form>
   </div>
-  <img class="plot" src="{{ url_for('analysis_elbow_plot') }}"
-       alt="Elbow k vs input size, by category">
+  <img class="plot" src="{{ url_for('analysis_knee_plot') }}"
+       alt="Knee k vs input size, by category">
 
   <div class="plot-head">
-    <h2>Utility captured at elbow vs input size</h2>
+    <h2>Utility captured at knee vs input size</h2>
     <form method="post" action="{{ url_for('save_analysis_plot', name='captured') }}">
       <button class="small" type="submit">Save PDF</button>
     </form>
   </div>
   <img class="plot" src="{{ url_for('analysis_captured_plot') }}"
-       alt="Percent of max utility captured at elbow vs input size, by category">
+       alt="Percent of max utility captured at knee vs input size, by category">
   {% else %}
     <p class="muted">No summaries yet — run an analysis from the home page first.</p>
   {% endif %}

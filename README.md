@@ -3,9 +3,9 @@
 A small Flask web app for running **Byte Pair Encoding (BPE)** experiments on
 any text. Give it some text and a number **k** (how many merges to perform),
 and it reports how well BPE compresses that text: how many tokens are left,
-how big the learned vocabulary grew, and what the longest learned token looks
-like. Every run is saved to a local SQLite database so results can be
-compared and plotted against k. It also finds each input's **elbow** — the
+how many of them are distinct, and how big the learned vocabulary grew.
+Every run is saved to a local SQLite database so results can be
+compared and plotted against k. It also finds each input's **knee** — the
 k where extra merges stop paying for themselves — and plots that across
 every input analysed so far, so prose and code can be compared directly.
 
@@ -19,7 +19,7 @@ Built as part of a thesis on compressed text analysis.
 2. [Worked example](#worked-example)
 3. [The rules](#the-rules)
 4. [What the app measures](#what-the-app-measures)
-5. [The elbow: where merges stop paying off](#the-elbow-where-merges-stop-paying-off)
+5. [The knee: where merges stop paying off](#the-knee-where-merges-stop-paying-off)
 6. [Project structure](#project-structure)
 7. [Architecture](#architecture)
 8. [File-by-file reference](#file-by-file-reference)
@@ -106,7 +106,6 @@ ban ana ␣ ban d ana          →  6 tokens
 - **Utility** (characters saved) = 14 − 6 = **8**
 - **Vocabulary** — the final tokens are `ban, ana, ␣, ban, d, ana`, so the
   distinct set is `{ban, ana, ␣, d}` = **4 distinct tokens**
-- **Longest token** = `ban` (the first token of length 3 found)
 
 Note how round 1 has an interesting subtlety: `(a,n)` and `(n,a)` overlap
 inside `banana`, and merging is resolved strictly left to right (see rule 6
@@ -175,7 +174,6 @@ that before/after comparison:
 | **Distinct tokens** | `len(set(tokens))` — how many *different* tokens appear in the final list. | What the text is actually built from at this k. It can go **down** as k rises: merging away every remaining `q` leaves that character unused, so the count drops even though the vocabulary you'd have to ship grew. |
 | **Learned vocab** | `len(set(text)) + len(merges)` — the starting alphabet plus one symbol per merge. | The cost side of the trade-off, and the honest one: every merge adds a symbol to the "dictionary" needed to decode the text, and that symbol stays in it whether or not the token still appears. This is the number real tokenizers quote as vocabulary size. |
 | **Utility** | `chars − tokens`, i.e. U(s,k) = \|s\| − \|s_k\| — the number of characters saved after k merges. | The headline number. 0 = untouched; higher means better compression. Always a non-negative whole number, and a *lossless* measure — the original text is always exactly recoverable from the tokens. |
-| **Longest token** | The longest string in the final vocabulary. | A qualitative window into what BPE learned. In prose it's usually a frequent word with its space (`the `); in code it can be a whole keyword or repeated snippet (`def `, `return `). |
 
 ### Why sweep over k instead of running once?
 
@@ -201,17 +199,17 @@ different inputs (prose vs code, short vs long) shows how the *structure* of
 a text determines how compressible it is — which is the question this
 analyser exists to explore.
 
-## The elbow: where merges stop paying off
+## The knee: where merges stop paying off
 
 The utility curve always has the same shape — steep, then flat — so the
 interesting question isn't "how much can this text compress" but **"how few
 merges get you most of the way there."** That bend in the curve is the
-**elbow**, and the app computes it per input, then compares it across
+**knee**, and the app computes it per input, then compares it across
 inputs on the `/analysis` page.
 
 **How it's found.** `bpe.analyse_series(text)` runs BPE once and records
 the utility after *every* merge, from k = 0 to saturation (the point where
-no pair repeats and further merges are impossible). `bpe.find_elbow_k()`
+no pair repeats and further merges are impossible). `bpe.find_knee_k()`
 then takes that list of utilities and applies the knee / distance-to-chord
 method (Satopaa et al., 2011, *Finding a "Kneedle" in a Haystack*):
 
@@ -221,7 +219,7 @@ method (Satopaa et al., 2011, *Finding a "Kneedle" in a Haystack*):
    on the same footing.
 2. Draw the straight chord from (0, 0) to (1, 1) — that's what the curve
    would look like if every merge paid off equally, i.e. no bend at all.
-3. The elbow is the k whose point sits **farthest above** that chord — the
+3. The knee is the k whose point sits **farthest above** that chord — the
    point of maximum "you're ahead of a linear pace here."
 
 A single-point curve, or one that compresses nothing at all, has no
@@ -231,7 +229,7 @@ meaningful bend, so both return k = 0.
 sequence of integers, so numerical second derivatives on it are noisy and
 would need smoothing parameters chosen by hand. The chord distance is one
 subtraction per point, has nothing to tune, and is deterministic — the same
-text always gives the same elbow.
+text always gives the same knee.
 
 **What's reported per input** (`bpe.summarize()`, stored in the
 `file_summary` table, shown on `/analysis`):
@@ -239,22 +237,21 @@ text always gives the same elbow.
 | Field | Meaning |
 |---|---|
 | **`size_chars`** | Input size, the first thing any cross-file comparison has to control for — and the x-axis of both plots below. Characters, not words: BPE operates on characters, and a word count means something different for prose than for code. |
-| **`elbow_k`** | The knee: how many merges before returns visibly diminish. |
-| **`utility_at_elbow` / `tokens_at_elbow` / `learned_vocab_at_elbow`** | The state of the text at that k — characters saved, tokens left, and the learned vocabulary (base alphabet + `elbow_k`, since every merge adds one symbol). The base alphabet is computed where it's needed rather than stored as its own column — it's just `len(set(text))`, recoverable from the input at any time. |
+| **`knee_k`** | How many merges before returns visibly diminish. |
+| **`utility_at_knee` / `tokens_at_knee` / `learned_vocab_at_knee`** | The state of the text at that k — characters saved, tokens left, and the learned vocabulary (base alphabet + `knee_k`, since every merge adds one symbol). The base alphabet is computed where it's needed rather than stored as its own column — it's just `len(set(text))`, recoverable from the input at any time. |
 | **`max_utility`** | Utility at saturation — the most this text can ever be compressed by BPE. |
-| **`pct_captured_at_elbow`** | `utility_at_elbow ÷ max_utility`. **The headline number**: the share of all available compression you get for `elbow_k` merges instead of `saturation_k`. |
-| **`longest_token_at_elbow`** | The longest token learned by the elbow — a qualitative peek at *what* the useful merges actually captured. |
+| **`pct_captured_at_knee`** | `utility_at_knee ÷ max_utility`. **The headline number**: the share of all available compression you get for `knee_k` merges instead of `saturation_k`. |
 | **`saturation_k`** | Where merging stops being possible at all (rule 8). |
 
 **The two cross-file plots**, both with input size on the x-axis and points
 coloured by category (the same blue/red as the per-input plot):
 
-- **Elbow k vs input size** — does the point of diminishing returns depend
+- **Knee k vs input size** — does the point of diminishing returns depend
   mostly on how long a text is, or on what kind of text it is? Size is on
   the x-axis specifically so that confound can be read off directly: if the
   code and prose points lie on the same line, the category isn't adding
   anything beyond length.
-- **Utility captured at elbow vs input size** — how good a deal the elbow
+- **Utility captured at knee vs input size** — how good a deal the knee
   is, per input. A high value means a small vocabulary buys nearly all of
   the available compression.
 
@@ -264,12 +261,12 @@ coloured by category (the same blue/red as the per-input plot):
 
 ```
 main.py                    Entry point — starts the Flask dev server
-bpe.py                     The BPE algorithm, analyse(), and elbow detection
+bpe.py                     The BPE algorithm, analyse(), and knee detection
 app.py                     Flask routes: form handling, running experiments
 api.py                     JSON API blueprint (/api/...) with Swagger docs
 db.py                      SQLite storage (schema, save/load, dedup logic)
 config.py                  Shared constants (paths, samples, input/k caps)
-test_bpe.py                Plain-assert tests for the elbow + summary logic
+test_bpe.py                Plain-assert tests for the knee + summary logic
 test_db.py                 Tests for the no-duplicate-rows guarantees
 templates/
   base.html                Shared layout + all CSS
@@ -307,7 +304,7 @@ separation matters for two reasons:
 - **The algorithm is testable in isolation.** You can open a Python shell,
   `import bpe`, and check `bpe.analyse("banana bandana", 3)` by hand without
   a server or database running — important when the numbers need to hold up
-  in a thesis. `test_bpe.py` does exactly this for the elbow logic: it
+  in a thesis. `test_bpe.py` does exactly this for the knee logic: it
   imports `bpe` and nothing else, no server, no database, no fixtures.
 - **Each file has one reason to change.** A new metric touches `bpe.py` (and
   a column in `db.py`); a new page touches `app.py` and a template; a schema
@@ -420,8 +417,7 @@ browser.
   letting `app.py` call `train_bpe` directly) so there is exactly one
   place in the codebase that defines what each number means — `utility`
   is `original_len - token_count`, computed here and nowhere else.
-  `longest_token` uses `max(..., default="")` so an empty input yields an
-  empty string instead of a crash. `original_len` is always `len(text)`
+  `original_len` is always `len(text)`
   for whatever was actually passed in — since cleaning happens (or
   doesn't) before this function is ever called, a cleaned and a raw
   version of the same source simply arrive as two different strings with
@@ -430,17 +426,17 @@ browser.
 
 - **`analyse_series(text)`** — the whole utility curve in one pass: runs
   BPE from single characters and records a stats row (`k`, `token_count`,
-  `utility`, `distinct_tokens`, `learned_vocab`, `longest_token`) after every
+  `utility`, `distinct_tokens`, `learned_vocab`) after every
   merge, stopping at the same natural point as `train_bpe`. It exists
   because the alternative — calling `analyse(text, k)` once per k — retrains
   from scratch every time, turning an O(k) walk into O(k²) work for a curve
   the single pass already passes through. It also yields *every* k, not
-  just a sweep's step points, which is what makes locating an exact elbow
+  just a sweep's step points, which is what makes locating an exact knee
   possible. The first row is k = 0 (the untouched character list), so the
   series always starts from the utility-0 baseline.
 
-- **`find_elbow_k(utilities)`** — the knee finder described in
-  [The elbow](#the-elbow-where-merges-stop-paying-off) above: normalize
+- **`find_knee_k(utilities)`** — the knee finder described in
+  [The knee](#the-knee-where-merges-stop-paying-off) above: normalize
   both axes to [0, 1], return the k farthest above the (0,0)–(1,1) chord.
   It takes a plain list of numbers rather than the series dicts on purpose
   — that makes it a pure function of a curve, with no dependency on BPE or
@@ -451,10 +447,10 @@ browser.
 
 - **`summarize(text, category, label)`** — combines the two into the flat
   dict `db.save_summary()` stores, one row per input: size stats, the
-  elbow point, the saturation k, and `pct_captured_at_elbow`. Same
+  knee point, the saturation k, and `pct_captured_at_knee`. Same
   convention as `analyse()` — the caller normalizes the text first; this
   function has no opinion on cleaning. Every field is listed in
-  [The elbow](#the-elbow-where-merges-stop-paying-off).
+  [The knee](#the-knee-where-merges-stop-paying-off).
 
 ### `db.py` — storage (the experiment ledger)
 
@@ -654,12 +650,12 @@ these caps.
   `results()` it isn't scoped to a hash — it's the only page in the app
   that looks at every input at once.
 
-- **`_build_analysis_figure(y_field, y_label, title)` + `analysis_elbow_plot()` /
-  `analysis_captured_plot()`** — `GET /analysis/elbow.png` and
+- **`_build_analysis_figure(y_field, y_label, title)` + `analysis_knee_plot()` /
+  `analysis_captured_plot()`** — `GET /analysis/knee.png` and
   `/analysis/captured.png`. The two plots differ only in which summary
   column goes on the y-axis, so their three arguments live in one
   `ANALYSIS_PLOTS` dict keyed by name, which both the PNG routes and the
-  Save PDF route read — the name in the URL (`elbow`, `captured`) is the
+  Save PDF route read — the name in the URL (`knee`, `captured`) is the
   key, so a new cross-file plot is one dict entry plus one route. Points are grouped and coloured by category with the **same
   palette as `plot()`** (`code` = `#4058B0`, `english` = `#B05840`) so the
   mapping carries across pages, and the legend is drawn only when more than
@@ -763,8 +759,8 @@ nothing.
   `bpe.py` and stored by `db.py`, so the view layer can't introduce a
   discrepancy.
 - **`analysis.html`** — the cross-file page: one table row per stored
-  summary (category, size, elbow k, learned vocab at elbow, % utility captured,
-  longest token at elbow), then the two scatter plots. It shows a subset of
+  summary (category, size, knee k, learned vocab at knee, % utility
+  captured), then the two scatter plots. It shows a subset of
   the summary columns, not all of them — the rest are stored for querying
   the database directly, but a table wide enough to hold every field stops
   being readable. When no summaries exist yet it says so and points at the
@@ -839,11 +835,11 @@ Plain `assert`s and a `__main__` block — no pytest, no test runner to
 install. Both files cover the places where a wrong answer would still look
 perfectly plausible on screen.
 
-**`test_bpe.py` — the elbow maths.** `find_elbow_k` on a concave curve
+**`test_bpe.py` — the knee maths.** `find_knee_k` on a concave curve
 whose bend is known by construction (asserted as a range, since the method
 claims to find the bend *region*, not one exact index), its degenerate
 cases, and an internal-consistency check on `summarize()`
-(`learned_vocab_at_elbow == len(set(text)) + elbow_k`, `0 <= elbow_k <=
+(`learned_vocab_at_knee == len(set(text)) + knee_k`, `0 <= knee_k <=
 saturation_k`, the captured percentage within [0, 1]). The BPE core itself
 isn't retested here — the [worked example](#worked-example) above pins it
 by hand.
@@ -876,8 +872,8 @@ suite can never touch a real `experiments.db`.
    results page with a graph and a table of every stored run for that
    exact text.
 5. Click **Analysis** (button on the home page, or the header link on every
-   page) to see every input analysed so far in one table, with its elbow k
-   and how much of the available compression that elbow captures, plus both
+   page) to see every input analysed so far in one table, with its knee k
+   and how much of the available compression that knee captures, plus both
    against input size as scatter plots. Every run adds to this page
    automatically — there's nothing extra to click.
 6. Click **Save PDF** next to any graph to keep a vector copy of it, and
@@ -909,7 +905,7 @@ beside its heading. Clicking it writes that graph into the project's
   stays sharp at any size. The two formats are generated from the *same*
   figure-building function, so what's saved is always what was shown.
 - **Filenames are stable, so saving twice replaces rather than
-  accumulates.** A cross-file plot saves as `analysis_elbow.pdf` or
+  accumulates.** A cross-file plot saves as `analysis_knee.pdf` or
   `analysis_captured.pdf`; a per-input plot as
   `results_<label>_<hash8>.pdf`. Re-run an input, click Save PDF again, and
   its file is updated in place — you never end up choosing between six
@@ -942,8 +938,8 @@ beside its heading. Clicking it writes that graph into the project's
   categories if the hash has rows in both, **and** its summary row — so it
   leaves the results page and the `/analysis` page at the same time.
 - Alongside `experiments`, a second table **`file_summary`** holds one row
-  per (input hash, category) — the elbow stats described
-  [above](#the-elbow-where-merges-stop-paying-off). It's written on every
+  per (input hash, category) — the knee stats described
+  [above](#the-knee-where-merges-stop-paying-off). It's written on every
   run and keyed `UNIQUE (input_hash, category)` with `INSERT OR REPLACE`,
   so re-running a file updates its summary in place rather than adding a
   second one. Unlike `experiments`, nothing here is deduplicated *against*
