@@ -9,24 +9,20 @@
   </div>
 
   <img class="plot" src="{{ url_for('plot', ihash=ihash) }}"
-       alt="Compression utility, and learned vocabulary vs distinct tokens, vs k">
+       alt="Utility, and vocabulary vs distinct tokens, against k">
 
   <table>
     <tr>
-      <th class="num">k</th><th>Category</th><th class="num">Merges applied</th><th class="num">Chars</th>
-      <th class="num">Tokens</th><th class="num">Distinct tokens</th><th class="num">Learned vocab</th>
-      <th class="num">Utility</th>
+      <th class="num">k</th><th class="num">Tokens</th><th class="num">Utility</th>
+      <th class="num">Vocabulary</th><th class="num">Distinct tokens</th>
     </tr>
     {% for r in rows %}
     <tr>
       <td class="num">{{ r['k'] }}</td>
-      <td>{{ r['category'] }}</td>
-      <td class="num">{{ r['merges_applied'] }}</td>
-      <td class="num">{{ r['original_chars'] }}</td>
-      <td class="num">{{ r['token_count'] }}</td>
-      <td class="num">{{ r['distinct_tokens'] }}</td>
-      <td class="num">{{ r['learned_vocab'] }}</td>
+      <td class="num">{{ r['tokens'] }}</td>
       <td class="num">{{ r['utility'] }}</td>
+      <td class="num">{{ r['vocabulary'] }}</td>
+      <td class="num">{{ r['distinct_tokens'] }}</td>
     </tr>
     {% endfor %}
   </table>

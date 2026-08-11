@@ -215,7 +215,7 @@ def _safe_stem(label):
 
 
 def _build_results_figure(ihash):
-    """Compression utility, and learned vocabulary vs distinct tokens, vs k. One line per category
+    """Utility, and vocabulary vs distinct tokens, against k. One line per category
     if a hash has rows from more than one (still possible — category,
     unlike cleaned, stays part of an experiment's identity)."""
     conn = db.connect()
@@ -234,19 +234,19 @@ def _build_results_figure(ihash):
         ks = [r["k"] for r in crows]
         color = colors.get(category)
         ax1.plot(ks, [r["utility"] for r in crows], marker="o", label=category, color=color)
-        ax2.plot(ks, [r["learned_vocab"] for r in crows], marker="o",
-                 label=f"{category} — learned vocab (memory)", color=color)
+        ax2.plot(ks, [r["vocabulary"] for r in crows], marker="o",
+                 label=f"{category} — vocabulary", color=color)
         ax2.plot(ks, [r["distinct_tokens"] for r in crows], marker="o", linestyle="--",
                  label=f"{category} — distinct tokens", color=color)
 
-    ax1.set_xlabel("k (BPE merges)")
-    ax1.set_ylabel("Compression utility (|s| - |s_k|), characters saved")
-    ax1.set_title("Compression utility vs k")
+    ax1.set_xlabel("k")
+    ax1.set_ylabel("Utility")
+    ax1.set_title("Utility vs k")
     ax1.grid(True, alpha=0.3)
 
-    ax2.set_xlabel("k (BPE merges)")
-    ax2.set_ylabel("Vocabulary (tokens)")
-    ax2.set_title("Learned vocabulary & distinct tokens vs k")
+    ax2.set_xlabel("k")
+    ax2.set_ylabel("Vocabulary")
+    ax2.set_title("Vocabulary & distinct tokens vs k")
     ax2.grid(True, alpha=0.3)
 
     ax2.legend(fontsize=8)
@@ -279,8 +279,8 @@ def save_results_plot(ihash):
 
 @app.route("/analysis")
 def analysis():
-    """Cross-file summary: one row per analysed input, with knee-point
-    stats, plus links to the two comparison plots."""
+    """Cross-file summary: one row per analysed input, with its k* stats,
+    plus links to the two comparison plots."""
     conn = db.connect()
     summaries = db.get_all_summaries(conn)
     conn.close()
@@ -290,8 +290,8 @@ def analysis():
 def _build_analysis_figure(y_field, y_label, title):
     """Category-coloured plot of `y_field` vs size_chars — one marked line per
     category, so the trend across the size-graded samples is visible and not
-    just the individual points. Shared by the /analysis/knee.png and
-    /analysis/captured.png routes and their Save PDF counterparts."""
+    just the individual points. Shared by the two cross-file plot routes and
+    their Save PDF counterparts."""
     conn = db.connect()
     summaries = db.get_all_summaries(conn)
     conn.close()
@@ -311,7 +311,7 @@ def _build_analysis_figure(y_field, y_label, title):
         ax.plot(xs, ys, marker="o", markersize=7, linewidth=2,
                 label=category, color=colors.get(category))
 
-    ax.set_xlabel("Input size (characters)")
+    ax.set_xlabel("Size (characters)")
     ax.set_ylabel(y_label)
     ax.set_title(title)
     ax.grid(True, alpha=0.3)
@@ -323,21 +323,24 @@ def _build_analysis_figure(y_field, y_label, title):
 
 # The two cross-file plots differ only in which summary field they chart, so
 # their arguments live here and both the PNG and the Save PDF routes read them.
+# Each key is also a URL and saved-filename segment, and is the summary column
+# it charts — so the name in the URL, the name in the database and the name on
+# the axis are the same name.
 ANALYSIS_PLOTS = {
-    "knee": ("knee_k", "Knee k (BPE merges)", "Knee k vs input size"),
-    "captured": ("pct_captured_at_knee", "% of max utility captured at knee",
-                 "Utility captured at knee vs input size"),
+    "k_star": ("k_star", "k*", "k* vs Size (characters)"),
+    "utility_ratio": ("utility_ratio", "Utility ratio",
+                      "Utility ratio vs Size (characters)"),
 }
 
 
-@app.route("/analysis/knee.png")
-def analysis_knee_plot():
-    return _serve_png(_build_analysis_figure(*ANALYSIS_PLOTS["knee"]))
+@app.route("/analysis/k_star.png")
+def analysis_k_star_plot():
+    return _serve_png(_build_analysis_figure(*ANALYSIS_PLOTS["k_star"]))
 
 
-@app.route("/analysis/captured.png")
-def analysis_captured_plot():
-    return _serve_png(_build_analysis_figure(*ANALYSIS_PLOTS["captured"]))
+@app.route("/analysis/utility_ratio.png")
+def analysis_utility_ratio_plot():
+    return _serve_png(_build_analysis_figure(*ANALYSIS_PLOTS["utility_ratio"]))
 
 
 @app.route("/save/analysis/<name>", methods=["POST"])

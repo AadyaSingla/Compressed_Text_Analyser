@@ -48,7 +48,7 @@
       </div>
     </div>
     <p class="muted">With a step, the analyser runs k = 0, step, 2·step, … up to k, so the
-      results page can show compression utility, learned vocabulary and distinct tokens across
+      results page can show utility, vocabulary and distinct tokens across
       the whole sweep. Repeated (input, k, category) combinations reuse the
       stored row — no duplicates.</p>
 
@@ -68,13 +68,13 @@
   <h2>Stored inputs</h2>
   {% if inputs %}
   <table>
-    <tr><th>Label</th><th>Category</th><th class="num">Chars</th><th class="num">Runs</th>
+    <tr><th>Input</th><th>Type</th><th class="num">Size (characters)</th><th class="num">Runs</th>
         <th class="num">Max k</th><th>Last run (UTC)</th><th></th></tr>
     {% for i in inputs %}
     <tr>
       <td><a href="{{ url_for('results', ihash=i['input_hash']) }}">{{ i['label'] }}</a></td>
       <td>{{ i['category'] }}</td>
-      <td class="num">{{ i['original_chars'] }}</td>
+      <td class="num">{{ i['size_chars'] }}</td>
       <td class="num">{{ i['runs'] }}</td>
       <td class="num">{{ i['max_k'] }}</td>
       <td>{{ i['last_run'] }}</td>

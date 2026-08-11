@@ -43,7 +43,7 @@ def list_inputs():
               category: {type: string}
               cleaned: {type: integer}
               label: {type: string}
-              original_chars: {type: integer}
+              size_chars: {type: integer}
               runs: {type: integer}
               max_k: {type: integer}
               last_run: {type: string}

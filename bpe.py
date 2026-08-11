@@ -90,9 +90,9 @@ def analyse_series(text):
 
     Stops at the same natural point as train_bpe (no pair occurs at least
     twice), so it replaces calling analyse() once per k: a single pass
-    yields the whole utility curve find_knee_k() needs. Returns a list of
+    yields the whole utility curve find_k_star() needs. Returns a list of
     dicts, one per k from 0 (the starting state) to the stop, each with:
-    k, token_count, utility, distinct_tokens, learned_vocab.
+    k, tokens, utility, distinct_tokens, vocabulary.
     Pure — no I/O.
     """
     tokens = list(text)
@@ -101,10 +101,10 @@ def analyse_series(text):
     def _record(k, tokens):
         return {
             "k": k,
-            "token_count": len(tokens),
+            "tokens": len(tokens),
             "utility": len(text) - len(tokens),
             "distinct_tokens": len(set(tokens)),
-            "learned_vocab": base_alphabet + k,
+            "vocabulary": base_alphabet + k,
         }
 
     series = [_record(0, tokens)]
@@ -120,14 +120,14 @@ def analyse_series(text):
     return series
 
 
-def find_knee_k(utilities):
-    """Return the k that best trades off compression against merge count.
+def find_k_star(utilities):
+    """Return k* — the k that best trades off compression against merge count.
 
     `utilities` is indexed by k (utility after k merges), k=0..saturation.
-    Uses the knee / distance-to-chord method (Satopaa et al., 2011,
-    "Finding a 'Kneedle' in a Haystack"): normalize both axes to [0, 1] and
-    return the k whose point sits farthest above the straight chord from
-    (0, 0) to (1, 1). Pure, so it's directly unit-testable.
+    Uses the distance-to-chord method (Satopaa et al., 2011, "Finding a
+    'Kneedle' in a Haystack"): normalize both axes to [0, 1] and return the
+    k whose point sits farthest above the straight chord from (0, 0) to
+    (1, 1). Pure, so it's directly unit-testable.
     """
     k_max = len(utilities) - 1
     if k_max == 0:
@@ -147,31 +147,29 @@ def find_knee_k(utilities):
 
 def summarize(text, category, label):
     """Summarize one file's BPE behaviour as a single flat dict: size
-    stats plus the knee point (the k of diminishing returns).
+    stats plus k* (the k of diminishing returns).
 
     `text` must already be normalized by the caller, same convention as
-    analyse(). Combines analyse_series() and find_knee_k() into the row
+    analyse(). Combines analyse_series() and find_k_star() into the row
     shape stored by db.save_summary().
     """
     series = analyse_series(text)
     utilities = [r["utility"] for r in series]
-    knee_k = find_knee_k(utilities)
-    knee = series[knee_k]
+    k_star = find_k_star(utilities)
+    best = series[k_star]
     saturation = series[-1]
 
-    base_alphabet = len(set(text))
     max_utility = saturation["utility"]
 
     return {
         "label": label,
         "category": category,
         "size_chars": len(text),
-        "knee_k": knee_k,
-        "utility_at_knee": knee["utility"],
-        "tokens_at_knee": knee["token_count"],
-        "learned_vocab_at_knee": base_alphabet + knee_k,
+        "k_star": k_star,
+        "utility_at_k_star": best["utility"],
+        "tokens_at_k_star": best["tokens"],
         "max_utility": max_utility,
-        "pct_captured_at_knee": (knee["utility"] / max_utility) if max_utility else 0.0,
+        "utility_ratio": (best["utility"] / max_utility) if max_utility else 0.0,
         "saturation_k": saturation["k"],
     }
 
@@ -183,17 +181,15 @@ def analyse(text, k):
     step the caller applies beforehand (see `normalize()`), not something
     this function does implicitly."""
     tokens, merges = train_bpe(text, k)
-    original_len = len(text)
+    size_chars = len(text)
     token_count = len(tokens)
-    distinct_tokens = len(set(tokens))
-    learned_vocab = len(set(text)) + len(merges)
     return {
         "k": k,
         "merges_applied": len(merges),
-        "original_chars": original_len,
-        "token_count": token_count,
-        "distinct_tokens": distinct_tokens,
-        "learned_vocab": learned_vocab,
-        "utility": original_len - token_count,
+        "size_chars": size_chars,
+        "tokens": token_count,
+        "distinct_tokens": len(set(tokens)),
+        "vocabulary": len(set(text)) + len(merges),
+        "utility": size_chars - token_count,
         "merges": merges,
     }

@@ -7,6 +7,67 @@ project evolves.)
 
 ---
 
+## 2026-08-11 — One name per metric
+
+- **Every quantity now has exactly one name, used the same in the code, the
+  tables and the graphs.** The vocabulary was drifting per surface — the
+  same number was "learned vocab" in a table header, `learned_vocab` in a
+  column, and "learned vocab (memory)" in a plot legend. The agreed names
+  are: **k** (merges), **k\*** (the recommended merge count),
+  **Saturation k**, **Size (characters)**, **Utility**, **Vocabulary**,
+  **Distinct tokens**, **Tokens** (encoded length) and **Utility ratio**
+  (the share of the maximum utility that k\* reaches).
+
+- **The bend in the curve is k\*, not the "knee".** `find_knee_k()` is now
+  `find_k_star()`; the summary fields are `k_star`, `utility_at_k_star`,
+  `tokens_at_k_star` and `utility_ratio`. The words *knee* and *elbow*
+  are gone from every field name, table header, axis label, title and image
+  alt text. The only surviving occurrence anywhere is the *Kneedle* paper
+  citation in `find_k_star`'s docstring, which is a title and stays as
+  published.
+
+- **The cross-file plot routes were renamed too, breaking the old links.**
+  `/analysis/knee.png` → `/analysis/k_star.png` and `/analysis/captured.png`
+  → `/analysis/utility_ratio.png`, with `analysis_knee_plot()` /
+  `analysis_captured_plot()` and the `ANALYSIS_PLOTS` keys following. Each
+  key is now exactly the summary column it charts, so the name in the URL,
+  the name in the database and the name on the axis are one name — the
+  alternative was a URL saying *knee* for an axis labelled *k\**, which is
+  the drift this pass exists to remove. The saved filenames move with the
+  keys: `analysis_k_star.pdf` and `analysis_utility_ratio.pdf`. Anything
+  linking to the old URLs (a bookmark, a figure path in a draft) needs
+  updating; nothing in the app itself does, since every link is built with
+  `url_for`.
+
+- **Columns renamed to match**: `experiments.original_chars` → `size_chars`,
+  `token_count` → `tokens`, `learned_vocab` → `vocabulary`, and the
+  `file_summary` knee columns → the `k_star` family. Dropped
+  `learned_vocab_at_knee`: it is exactly `len(set(text)) + k_star`, so it
+  was a stored restatement of two other columns.
+
+- **Tables show less.** The per-k table is down to k, Tokens, Utility,
+  Vocabulary, Distinct tokens — category, merges applied and the character
+  count are identical on every row of a single input, so as columns they
+  were pure repetition. The cross-file table is Input, Type, Size, k\*,
+  Utility ratio, Saturation k: Saturation k gained a column (it bounds k\*
+  and was already stored), vocabulary-at-k\* lost one along with its field.
+
+- **Utility ratio is shown as a decimal** (`0.74`), not `74.0%` — it is
+  a ratio of two utilities and reads as one on a plot axis, so the table
+  and the axis now agree digit for digit.
+
+- **Migration**: renames, so no in-place migration — `experiments.db` was
+  rebuilt from the `input_string`s it already stored (backup at
+  `experiments.db.pre-k-star-rename.bak`). All 198 experiment rows and 14
+  summary rows came back with values identical to the backup's, field for
+  field; nothing about how anything is computed changed. The three saved
+  PDFs in `figures/` were re-saved through the app's own Save PDF routes so
+  they carry the new labels, and the two cross-file ones under their new
+  filenames — `analysis_knee.pdf` and `analysis_captured.pdf` were deleted
+  rather than left behind as stale copies under dead names.
+
+---
+
 ## 2026-08-09 — Longest-token metric removed
 
 - **`longest_token` / `longest_token_at_knee` are gone** from `analyse()`,

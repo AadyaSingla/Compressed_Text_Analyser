@@ -13,14 +13,13 @@ DB_PATH = Path(__file__).parent / "experiments.db"
 
 # CREATE TABLE IF NOT EXISTS never alters an existing table, so any change to
 # the columns below needs experiments.db deleted and recreated — it won't be
-# migrated in place. Done for the file_summary word-count columns
-# (size_words, unique_words, type_token_ratio), dropped 2026-08-08; a database
-# from before then still has them and will fail on save_summary's INSERT.
-# Same again for the file_summary knee columns, renamed from elbow_* to knee_*
-# on 2026-08-09; a database from before then still has the elbow_* names.
-# Same again for the longest-token columns (experiments.longest_token,
-# file_summary.longest_token_at_knee), dropped 2026-08-09; a database from
-# before then still has them declared NOT NULL and will fail on insert.
+# migrated in place. The naming pass of 2026-08-11 renamed most columns in
+# both tables (original_chars -> size_chars, token_count -> tokens,
+# learned_vocab -> vocabulary, the knee_*/at_knee columns -> the k_star
+# family, pct_captured_at_knee -> utility_ratio) and dropped
+# file_summary.learned_vocab_at_knee, so any database written before then has
+# the old column names and will fail on insert. Rebuild it from the stored
+# input_strings rather than trying to migrate.
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS experiments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -31,10 +30,10 @@ CREATE TABLE IF NOT EXISTS experiments (
     input_string TEXT NOT NULL,
     k INTEGER NOT NULL,
     merges_applied INTEGER NOT NULL,
-    original_chars INTEGER NOT NULL,
-    token_count INTEGER NOT NULL,
+    size_chars INTEGER NOT NULL,
+    tokens INTEGER NOT NULL,
     distinct_tokens INTEGER NOT NULL,
-    learned_vocab INTEGER NOT NULL,
+    vocabulary INTEGER NOT NULL,
     utility INTEGER NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (input_string, k, category)
@@ -46,12 +45,11 @@ CREATE TABLE IF NOT EXISTS file_summary (
     label TEXT NOT NULL,
     category TEXT NOT NULL CHECK (category IN ('code', 'english')),
     size_chars INTEGER NOT NULL,
-    knee_k INTEGER NOT NULL,
-    utility_at_knee INTEGER NOT NULL,
-    tokens_at_knee INTEGER NOT NULL,
-    learned_vocab_at_knee INTEGER NOT NULL,
+    k_star INTEGER NOT NULL,
+    utility_at_k_star INTEGER NOT NULL,
+    tokens_at_k_star INTEGER NOT NULL,
     max_utility INTEGER NOT NULL,
-    pct_captured_at_knee REAL NOT NULL,
+    utility_ratio REAL NOT NULL,
     saturation_k INTEGER NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (input_hash, category)
@@ -90,7 +88,7 @@ def save_experiment(conn, label, category, cleaned, text, stats):
     conn.execute(
         """INSERT INTO experiments
            (label, category, cleaned, input_hash, input_string, k, merges_applied,
-            original_chars, token_count, distinct_tokens, learned_vocab, utility)
+            size_chars, tokens, distinct_tokens, vocabulary, utility)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             label,
@@ -100,10 +98,10 @@ def save_experiment(conn, label, category, cleaned, text, stats):
             text,
             stats["k"],
             stats["merges_applied"],
-            stats["original_chars"],
-            stats["token_count"],
+            stats["size_chars"],
+            stats["tokens"],
             stats["distinct_tokens"],
-            stats["learned_vocab"],
+            stats["vocabulary"],
             stats["utility"],
         ),
     )
@@ -114,7 +112,7 @@ def save_experiment(conn, label, category, cleaned, text, stats):
 def list_inputs(conn):
     """One summary row per distinct (input, category), newest first."""
     return conn.execute(
-        """SELECT input_hash, category, cleaned, label, original_chars,
+        """SELECT input_hash, category, cleaned, label, size_chars,
                   COUNT(*) AS runs, MAX(k) AS max_k, MAX(created_at) AS last_run
            FROM experiments
            GROUP BY input_hash, category
@@ -142,21 +140,19 @@ def save_summary(conn, ihash, summary):
     re-running a file's analysis refreshes its cross-file summary."""
     conn.execute(
         """INSERT OR REPLACE INTO file_summary
-           (input_hash, label, category, size_chars, knee_k, utility_at_knee,
-            tokens_at_knee, learned_vocab_at_knee, max_utility, pct_captured_at_knee,
-            saturation_k)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           (input_hash, label, category, size_chars, k_star, utility_at_k_star,
+            tokens_at_k_star, max_utility, utility_ratio, saturation_k)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             ihash,
             summary["label"],
             summary["category"],
             summary["size_chars"],
-            summary["knee_k"],
-            summary["utility_at_knee"],
-            summary["tokens_at_knee"],
-            summary["learned_vocab_at_knee"],
+            summary["k_star"],
+            summary["utility_at_k_star"],
+            summary["tokens_at_k_star"],
             summary["max_utility"],
-            summary["pct_captured_at_knee"],
+            summary["utility_ratio"],
             summary["saturation_k"],
         ),
     )
