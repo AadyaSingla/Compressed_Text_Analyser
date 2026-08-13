@@ -23,15 +23,19 @@ project evolves.)
   at k\*, unlabelled, so the vocabulary cost there can be read off without
   repeating the label that already sits on the utility panel.
 
-- **The saturation marker and chord are conditional, and that is the whole
-  subtlety.** They are drawn only when `saturation_k` is at most the largest
-  k among the stored rows. Most files were swept to k = 300 but saturate
+- **Nothing is drawn outside the swept range, and that is the whole
+  subtlety.** Each mark appears only when its own k is at most the largest k
+  among the stored rows. Most files were swept to k = 300 but saturate
   somewhere past 1,000: marking a point out there stretches the x-axis by a
   factor of five and squashes the actual measured curve into the left edge,
-  which loses more than the marker gains. Out of range, k\* is marked alone
-  and the axes stay exactly where the data put them. (k\* itself is always
-  marked; on a couple of files swept to 300 it sits a few merges past the
-  end, which nudges the axis slightly and is worth knowing.)
+  which loses more than the mark gains. The axes belong to the measured
+  data. So a file whose saturation is out of range is marked at k\* alone,
+  and one whose k\* is out of range too draws its curve unmarked — that last
+  case is real and not hypothetical: two of the stored inputs were swept to
+  300 and have k\* at 318 and 319, so an unbounded k\* marker was quietly
+  widening those axes by a few per cent. The vocabulary panel's dotted line
+  is inside the same guard, since `axvline` widens an axis exactly as a
+  marker does.
 
 - **`db.get_summary(conn, ihash, category)`** is new — the single-row
   counterpart to `get_all_summaries()`. Keyed on the pair the table is

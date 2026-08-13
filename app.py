@@ -223,12 +223,13 @@ def _mark_summary_points(ax_utility, ax_vocabulary, summary, max_k, color):
     it — without the chord the marker is a dot on a curve with nothing to
     say why that k and not its neighbour.
 
-    The saturation marker and the chord are drawn only when saturation_k
-    falls inside the swept range. Most files are swept to a few hundred
-    merges but only saturate past a thousand, and a marker out there
-    stretches the x-axis until the curve itself is squashed into the left
-    edge — so out of range, k* is marked alone and the axes are left as the
-    data set them.
+    Nothing is drawn outside the swept range: each mark appears only if its
+    own k is at most max_k. Most files are swept to a few hundred merges but
+    only saturate past a thousand, and a mark out there stretches the x-axis
+    until the curve itself is squashed into the left edge — the axes belong
+    to the measured data. So a file whose saturation is out of range is
+    marked at k* alone, and one whose k* is out of range too (k* can land
+    just past the end of a short sweep) gets its curve unmarked.
     """
     k_star, utility_at_k_star = summary["k_star"], summary["utility_at_k_star"]
     saturation_k, max_utility = summary["saturation_k"], summary["max_utility"]
@@ -245,16 +246,20 @@ def _mark_summary_points(ax_utility, ax_vocabulary, summary, max_k, color):
                             xytext=(-8, -12), ha="right", va="top", fontsize=8,
                             color=color)
 
-    ax_utility.plot([k_star], [utility_at_k_star], marker="*", markersize=14,
-                    color=color, zorder=5)
-    ax_utility.annotate(f"k* = {k_star}", (k_star, utility_at_k_star),
-                        textcoords="offset points", xytext=(6, -12),
-                        fontsize=8, color=color)
+    if k_star <= max_k:
+        ax_utility.plot([k_star], [utility_at_k_star], marker="*", markersize=14,
+                        color=color, zorder=5)
+        ax_utility.annotate(f"k* = {k_star}", (k_star, utility_at_k_star),
+                            textcoords="offset points", xytext=(6, -12),
+                            fontsize=8, color=color)
 
-    # The vocabulary panel gets the line but no label: it shares its x-axis
-    # meaning with the utility panel, where k* is already named.
-    ax_vocabulary.axvline(k_star, linestyle=":", linewidth=1, color=color,
-                          alpha=0.5, zorder=0)
+        # The vocabulary panel gets the line but no label: it shares its
+        # x-axis meaning with the utility panel, where k* is already named.
+        # It's inside the same guard because axvline widens the x-axis just
+        # as a marker does, so an out-of-range line would stretch this panel
+        # while the utility panel stayed put.
+        ax_vocabulary.axvline(k_star, linestyle=":", linewidth=1, color=color,
+                              alpha=0.5, zorder=0)
 
 
 def _build_results_figure(ihash):

@@ -229,9 +229,9 @@ meaningful bend, so both return k = 0.
 and labelled on the utility panel, with the chord between (0, 0) and
 (`saturation_k`, `max_utility`) as a thin dashed grey line, so the distance
 being maximised is visible rather than asserted. The saturation end is
-often far outside the swept range, and in that case the marker and the
-chord are left off — see `_mark_summary_points()` in the
-[file-by-file reference](#file-by-file-reference).
+often far outside the swept range, and anything outside that range is left
+off rather than allowed to stretch the axes — see `_mark_summary_points()`
+in the [file-by-file reference](#file-by-file-reference).
 
 **Why the chord and not curvature.** The utility curve is a discrete
 sequence of integers, so numerical second derivatives on it are noisy and
@@ -672,13 +672,16 @@ these caps.
   off](#k-where-merges-stop-paying-off)) — so without it the marker is a
   dot with nothing to say why that k and not its neighbour.
 
-  **The saturation marker and the chord appear only when `saturation_k <=`
-  the largest k among the stored rows.** Most files are swept to a few
-  hundred merges but saturate past a thousand, and a marker out there
-  stretches the x-axis until the curve is squashed into the left edge —
-  so out of range, k\* is marked alone and the axes stay as the data set
-  them. A category with no summary row yet draws its curve unmarked rather
-  than raising.
+  **Nothing is drawn outside the swept range**: each mark appears only if
+  its own k is at most the largest k among the stored rows. Most files are
+  swept to a few hundred merges but saturate past a thousand, and a mark out
+  there stretches the x-axis until the curve is squashed into the left edge
+  — the axes belong to the measured data. So a file whose saturation is out
+  of range is marked at k\* alone; one whose k\* is out of range too (it can
+  land just past the end of a short sweep) draws its curve unmarked. The
+  vocabulary panel's dotted line sits inside the same guard, since `axvline`
+  widens an axis just as a marker does. A category with no summary row yet
+  draws its curve unmarked as well, rather than raising.
 
 - **`analysis()`** — `GET /analysis`, the cross-file page: one
   `get_all_summaries()` query, straight into the template. Unlike
