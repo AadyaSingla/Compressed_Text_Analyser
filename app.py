@@ -214,9 +214,16 @@ def _safe_stem(label):
     return cleaned or "figure"
 
 
-def _mark_summary_points(ax_utility, ax_vocabulary, summary, max_k, color):
+def _mark_summary_points(ax_utility, ax_vocabulary, summary, max_k):
     """Put one category's stored k* and saturation point onto the per-file
-    figure, in that category's own colour.
+    figure.
+
+    Both marks and both labels are black, never the category colour: they
+    are the figure's answers about the curve, and a black mark on a coloured
+    curve reads as a point called out, where a same-coloured one reads as
+    one more point of the series. Shape, not colour, tells the two apart —
+    k* is a dot, saturation a square — so with two categories present the
+    marks are distinguished by their labels' values rather than by hue.
 
     k* is defined as the point sitting furthest above the straight chord
     from (0, 0) to (saturation_k, max_utility), so the chord is drawn with
@@ -237,19 +244,16 @@ def _mark_summary_points(ax_utility, ax_vocabulary, summary, max_k, color):
     if saturation_k <= max_k:
         ax_utility.plot([0, saturation_k], [0, max_utility], linestyle="--",
                         linewidth=0.8, color="grey", zorder=1)
-        ax_utility.plot([saturation_k], [max_utility], marker="s", markersize=6,
-                        color=color, zorder=4)
+        ax_utility.plot([saturation_k], [max_utility], marker="s", markersize=5,
+                        color="black", zorder=4)
         # Labelled below-left: saturation is the top-right end of the curve,
         # so a label above it lands outside the axes and gets clipped.
         ax_utility.annotate(f"Saturation k = {saturation_k}",
                             (saturation_k, max_utility), textcoords="offset points",
                             xytext=(-8, -12), ha="right", va="top", fontsize=8,
-                            color=color)
+                            color="black")
 
     if k_star <= max_k:
-        # Black, not the category colour: k* is the figure's answer, and a
-        # small dark dot on a coloured curve reads as a point *called out*
-        # rather than as one more point of the series.
         ax_utility.plot([k_star], [utility_at_k_star], marker="o", markersize=5,
                         color="black", zorder=5)
         ax_utility.annotate(f"k* = {k_star}", (k_star, utility_at_k_star),
@@ -295,7 +299,7 @@ def _build_results_figure(ihash):
         # An input analysed before its summary was stored simply gets its
         # curve without markers, rather than failing to plot at all.
         if summaries[category]:
-            _mark_summary_points(ax1, ax2, summaries[category], max(ks), color)
+            _mark_summary_points(ax1, ax2, summaries[category], max(ks))
 
     ax1.set_xlabel("k")
     ax1.set_ylabel("Utility")

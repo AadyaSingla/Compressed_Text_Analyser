@@ -14,13 +14,15 @@ project evolves.)
   `file_summary`, and then drawing a figure that read none of them —
   `_build_results_figure()` only ever saw the `experiments` rows. It now
   looks the summary up as well and hands it to a new
-  `_mark_summary_points()`: a small black dot at k\* labelled in black, a
-  square at saturation in the category's colour, and the chord from (0, 0)
-  to (`saturation_k`, `max_utility`) as a thin dashed grey line. k\* is
-  black rather than category-coloured because it is the figure's answer —
-  on a coloured curve a small dark dot reads as a point called out, where a
-  same-coloured one reads as just another point of the series. The chord
-  earns its place
+  `_mark_summary_points()`: a small black dot at k\*, a small black square
+  at saturation, both labelled in black, and the chord from (0, 0) to
+  (`saturation_k`, `max_utility`) as a thin dashed grey line. The marks are
+  black rather than category-coloured because they are the figure's answers
+  about the curve — on a coloured curve a black mark reads as a point called
+  out, where a same-coloured one reads as just another point of the series.
+  Shape carries what colour no longer does: dot for k\*, square for
+  saturation. `_mark_summary_points()` therefore takes no colour argument at
+  all. The chord earns its place
   because it is the definition — k\* is the point furthest above it — so
   drawing it turns the marker from an assertion into something the reader
   can check by eye. The vocabulary panel gets a light dotted vertical line
