@@ -246,11 +246,22 @@ def _mark_summary_points(ax_utility, ax_vocabulary, summary, max_k):
                         linewidth=0.8, color="grey", zorder=1)
         ax_utility.plot([saturation_k], [max_utility], marker="s", markersize=5,
                         color="black", zorder=4)
-        # Labelled below-left: saturation is the top-right end of the curve,
-        # so a label above it lands outside the axes and gets clipped.
+        # Saturation is the top-right end of the curve, so the label sits
+        # well below it, right-aligned just past it — the wedge of empty
+        # space between the flattening curve above and the chord to its
+        # left. Above the point lands outside the axes; nearer to it runs
+        # into the curve's own markers; further left, the chord crosses the
+        # text.
+        #
+        # One fixed offset, not a position computed per figure: every
+        # utility curve here has the same shape (concave, flattening into
+        # its right-hand end), so what clears the tail on one clears it on
+        # all. Checked at this panel size against every stored input — at
+        # worst the label keeps ~60px from the nearest plotted point, is
+        # crossed by the chord on none, and stays inside the axes on all.
         ax_utility.annotate(f"Saturation k = {saturation_k}",
                             (saturation_k, max_utility), textcoords="offset points",
-                            xytext=(-8, -12), ha="right", va="top", fontsize=8,
+                            xytext=(12, -56), ha="right", va="top", fontsize=8,
                             color="black")
 
     if k_star <= max_k:
