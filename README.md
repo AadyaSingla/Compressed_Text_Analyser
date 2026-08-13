@@ -662,11 +662,15 @@ these caps.
 
 - **`_mark_summary_points(ax_utility, ax_vocabulary, summary, max_k, color)`**
   — puts one category's stored `k_star` and `saturation_k` onto that
-  figure, in the category's own colour, from its `get_summary()` row: a
-  starred, labelled point at k\*, a square labelled point at saturation,
-  the thin dashed grey chord from (0, 0) to (`saturation_k`,
-  `max_utility`), and a light dotted vertical line at k\* on the vocabulary
-  panel so the vocabulary cost there can be read off. The chord is drawn
+  figure from its `get_summary()` row: a small **black** dot at k\* labelled
+  `k* = <value>` in black, a square labelled point at saturation in the
+  category's own colour, the thin dashed grey chord from (0, 0) to
+  (`saturation_k`, `max_utility`), and a light dotted vertical line at k\*
+  on the vocabulary panel so the vocabulary cost there can be read off.
+  k\* is black rather than category-coloured — it is the figure's answer,
+  and a small dark dot on a coloured curve reads as a point called out
+  rather than as one more point of the series; the vertical line matching
+  it is black for the same reason. The chord is drawn
   because it *is* the definition — k\* is the point sitting furthest above
   it (see [k\*: where merges stop paying
   off](#k-where-merges-stop-paying-off)) — so without it the marker is a

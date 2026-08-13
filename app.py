@@ -247,18 +247,21 @@ def _mark_summary_points(ax_utility, ax_vocabulary, summary, max_k, color):
                             color=color)
 
     if k_star <= max_k:
-        ax_utility.plot([k_star], [utility_at_k_star], marker="*", markersize=14,
-                        color=color, zorder=5)
+        # Black, not the category colour: k* is the figure's answer, and a
+        # small dark dot on a coloured curve reads as a point *called out*
+        # rather than as one more point of the series.
+        ax_utility.plot([k_star], [utility_at_k_star], marker="o", markersize=5,
+                        color="black", zorder=5)
         ax_utility.annotate(f"k* = {k_star}", (k_star, utility_at_k_star),
                             textcoords="offset points", xytext=(6, -12),
-                            fontsize=8, color=color)
+                            fontsize=8, color="black")
 
         # The vocabulary panel gets the line but no label: it shares its
         # x-axis meaning with the utility panel, where k* is already named.
         # It's inside the same guard because axvline widens the x-axis just
         # as a marker does, so an out-of-range line would stretch this panel
         # while the utility panel stayed put.
-        ax_vocabulary.axvline(k_star, linestyle=":", linewidth=1, color=color,
+        ax_vocabulary.axvline(k_star, linestyle=":", linewidth=1, color="black",
                               alpha=0.5, zorder=0)
 
 
