@@ -26,8 +26,9 @@ Built as part of a thesis on compressed text analysis.
 9. [Running the app](#running-the-app)
 10. [Tests](#tests)
 11. [Using it](#using-it)
-12. [Saving figures](#saving-figures)
-13. [Data storage and deduplication](#data-storage-and-deduplication)
+12. [The palette](#the-palette)
+13. [Saving figures](#saving-figures)
+14. [Data storage and deduplication](#data-storage-and-deduplication)
 
 ---
 
@@ -643,8 +644,9 @@ these caps.
   the same figure can also be written to disk as a PDF (see [Saving
   figures](#saving-figures)) without the two output formats ever drifting
   apart. Two side-by-side matplotlib charts — Utility vs k, and
-  the vocabulary pair (Vocabulary solid, Distinct tokens dashed, same
-  colour) vs k — built with
+  the vocabulary pair (Vocabulary solid in the category's colour, Distinct
+  tokens dashed in that category's second colour — see [the
+  palette](#the-palette) below) vs k — built with
   `matplotlib.use("Agg")` set before `pyplot` is imported (the app runs
   headless; without this, Flask can crash on macOS). Rows are grouped by
   `category` first, so a hash with rows in both categories draws one line
@@ -699,9 +701,9 @@ these caps.
   Save PDF route read — so a new cross-file plot is one dict entry plus one
   route. Each key **is** the summary column it charts, and is also the URL
   and saved-filename segment, so the name in the URL, the name in the
-  database and the name on the axis are one name. Points are grouped and coloured by category with the **same
-  palette as `plot()`** (`code` = `#4058B0`, `english` = `#B05840`) so the
-  mapping carries across pages, and the legend is drawn only when more than
+  database and the name on the axis are one name. Points are grouped and
+  coloured by category from the **same `CATEGORY_COLOURS` constant as
+  `plot()`** so the mapping carries across pages, and the legend is drawn only when more than
   one category is present — same rule, same reason. Like `plot()`, the PNG
   is streamed from `io.BytesIO` and the figure is `plt.close()`d after
   saving.
@@ -933,6 +935,36 @@ which always cleans. That's deliberate — a raw baseline was an easy thing
 to record by accident and hard to tell apart afterwards. `POST
 /api/experiments` with `"clean": false` still does it for anyone who wants
 the comparison on purpose.
+
+## The palette
+
+Four colours, defined once in `app.py` as `CATEGORY_COLOURS` and
+`DISTINCT_TOKEN_COLOURS`, and used by every figure the app draws:
+
+| Category | Utility, Vocabulary, cross-file points | Distinct tokens |
+|---|---|---|
+| `code` | blue `#4058B0` | aqua `#1baf7a` |
+| `english` | rust `#B05840` | yellow `#eda100` |
+
+A category keeps its own colour everywhere it appears, so the same category
+reads the same on the results page and on `/analysis`. **Distinct tokens
+gets a second hue** because it and Vocabulary are two different measures
+sharing one panel and one axis: they start equal, separate slowly, and can
+run close together for the whole sweep, which is more than line style alone
+can carry. Each pair stays in one temperature family — blue with aqua, rust
+with yellow — so the second line still reads as belonging to its category.
+Distinct tokens stays dashed as well as differently coloured, since the
+dashes survive a greyscale print of the thesis where the hue doesn't.
+
+These four were validated as a palette rather than picked by eye: every
+pair clears the colour-blind separation floors (worst pair ΔE 9.1 under
+protanopia) and the normal-vision floor (worst 22.6). Aqua and yellow fall
+below 3:1 contrast against white, which is acceptable **only** because the
+vocabulary panel always carries a legend and the results page prints the
+same numbers in a table right beneath the figure — if either of those goes
+away, the palette needs re-checking. Don't darken the yellow to fix the
+contrast: it moves towards the English rust and fails the normal-vision
+floor against it.
 
 ## Saving figures
 

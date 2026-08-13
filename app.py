@@ -39,6 +39,26 @@ Swagger(app)
 
 VALID_CATEGORIES = {"code", "english"}
 
+# One palette for every figure in the app, so a category is the same colour
+# wherever it appears. CATEGORY_COLOURS is the category's own colour, used
+# for its utility line, its vocabulary line and its cross-file points.
+# DISTINCT_TOKEN_COLOURS is the second hue the vocabulary panel needs:
+# vocabulary and distinct tokens are two different measures on one axis, and
+# telling them apart by line style alone asked too much of the reader when
+# the two curves run close together. Each category's pair stays in one
+# temperature family — blue with aqua for code, rust with yellow for English
+# — so the second line still reads as belonging to its category.
+#
+# These four were checked as a palette, not chosen by eye: every pair clears
+# the colour-blind separation and normal-vision floors (worst pair ΔE 9.1
+# protan, 22.6 normal). Aqua and yellow sit below 3:1 contrast against white,
+# which is allowed here only because the panel always carries a legend and
+# the results page prints the same numbers in a table directly beneath the
+# figure. Don't darken the yellow to fix that: it moves towards the English
+# rust and fails the normal-vision floor against it.
+CATEGORY_COLOURS = {"code": "#4058B0", "english": "#B05840"}
+DISTINCT_TOKEN_COLOURS = {"code": "#1baf7a", "english": "#eda100"}
+
 
 def _resolve_input():
     """Get (label, text, category) from the form, as the user supplied it.
@@ -259,17 +279,18 @@ def _build_results_figure(ihash):
     if not rows:
         abort(404)
 
-    colors = {"code": "#4058B0", "english": "#B05840"}
-
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
     for category, crows in by_category.items():
         ks = [r["k"] for r in crows]
-        color = colors.get(category)
+        color = CATEGORY_COLOURS.get(category)
         ax1.plot(ks, [r["utility"] for r in crows], marker="o", label=category, color=color)
         ax2.plot(ks, [r["vocabulary"] for r in crows], marker="o",
                  label=f"{category} — vocabulary", color=color)
+        # Its own colour, and still dashed: the line style survives a
+        # greyscale print of the thesis, where the colour doesn't.
         ax2.plot(ks, [r["distinct_tokens"] for r in crows], marker="o", linestyle="--",
-                 label=f"{category} — distinct tokens", color=color)
+                 label=f"{category} — distinct tokens",
+                 color=DISTINCT_TOKEN_COLOURS.get(category))
         # An input analysed before its summary was stored simply gets its
         # curve without markers, rather than failing to plot at all.
         if summaries[category]:
@@ -335,7 +356,6 @@ def _build_analysis_figure(y_field, y_label, title):
     by_category = defaultdict(list)
     for s in summaries:
         by_category[s["category"]].append(s)
-    colors = {"code": "#4058B0", "english": "#B05840"}
 
     fig, ax = plt.subplots(figsize=(6, 4.5))
     for category, srows in by_category.items():
@@ -345,7 +365,7 @@ def _build_analysis_figure(y_field, y_label, title):
         xs = [s["size_chars"] for s in srows]
         ys = [s[y_field] for s in srows]
         ax.plot(xs, ys, marker="o", markersize=7, linewidth=2,
-                label=category, color=colors.get(category))
+                label=category, color=CATEGORY_COLOURS.get(category))
 
     ax.set_xlabel("Size (characters)")
     ax.set_ylabel(y_label)

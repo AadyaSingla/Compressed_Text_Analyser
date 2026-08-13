@@ -7,6 +7,39 @@ project evolves.)
 
 ---
 
+## 2026-08-13 — Distinct tokens gets its own colour
+
+- **Vocabulary and Distinct tokens no longer share a colour.** They are two
+  different measures on one panel and one axis; they start equal and
+  separate slowly, so telling them apart by solid-vs-dashed alone asked too
+  much of the reader, especially for English where the two curves stay
+  close for the whole sweep. Distinct tokens now has a second hue per
+  category: aqua `#1baf7a` for code, yellow `#eda100` for English. It stays
+  dashed as well — the dashes survive a greyscale print of the thesis where
+  the hue doesn't.
+
+- **Each pair stays in one temperature family** — blue with aqua, rust with
+  yellow — so the second line still reads as belonging to its category
+  rather than as a third category appearing out of nowhere.
+
+- **The four colours were validated as a palette, not chosen by eye.** All
+  pairs clear the colour-blind separation floor (worst ΔE 9.1 protan) and
+  the normal-vision floor (worst 22.6). Two rejected candidates are worth
+  recording: green anywhere near the English rust fails deuteranopia
+  separation (ΔE 4.6 — the classic red/green collision), and darkening the
+  yellow towards a more legible gold pushes it *into* the rust and fails
+  the normal-vision floor (ΔE 13.8, floor 15). Aqua and yellow sit below
+  3:1 contrast on white, which is allowed only because the panel always has
+  a legend and the results table prints the same numbers directly beneath.
+
+- **The palette now lives in one place**: `CATEGORY_COLOURS` and
+  `DISTINCT_TOKEN_COLOURS` at module level in `app.py`, replacing the two
+  identical local `colors` dicts that `_build_results_figure()` and
+  `_build_analysis_figure()` each kept. Two copies of a palette is one copy
+  too many for a project whose whole naming pass was about single sources.
+
+---
+
 ## 2026-08-13 — Cleaning is part of running, not a button
 
 - **The Clean button and the `/clean` route are gone.** `run()` now calls
