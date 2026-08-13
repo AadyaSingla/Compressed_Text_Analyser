@@ -7,6 +7,44 @@ project evolves.)
 
 ---
 
+## 2026-08-13 — Cleaning is part of running, not a button
+
+- **The Clean button and the `/clean` route are gone.** `run()` now calls
+  `bpe.normalize(text, category)` itself, once, after validation and before
+  the sweep — so the cleaned text is what gets analysed, stored, hashed and
+  deduplicated against, and every run through the UI is a run on cleaned
+  text. One button where there were two.
+
+- **Why, beyond the click saved.** Cleaning being optional meant the stored
+  corpus could quietly hold both a cleaned and a raw version of the same
+  file: two hashes, two results pages, two points on the cross-file plots,
+  differing by nothing anyone chose deliberately, and nothing on the home
+  page to tell them apart (the Cleaned/Raw word only ever appeared on the
+  results-page figure title). The current database shows what the intent
+  always was — all 285 rows across all 14 inputs are `cleaned = 1`. This
+  makes that the rule rather than a habit.
+
+- **What went with it.** `_resolve_input()` drops its fourth return value
+  and its third input source: there is no carried-cleaned-text hidden
+  field, so no `\r\n` repair on the way back in, and no
+  sample > upload > carrier priority to reason about — just sample or
+  upload, returned raw. `_render_index(**prefill)` collapses back into
+  `index()`, since nothing re-renders the form with previous answers any
+  more, and `index.html` loses the read-only preview block, both hidden
+  fields, the `formaction` attribute and every `prefill_*` reference.
+
+- **The `cleaned` column stays.** `run()` passes `True` always, but
+  `POST /api/experiments` still honours a caller's `"clean": false`, so the
+  column still records something real and the API contract is unchanged.
+  Comparing cleaned against raw is now an API-only operation, which is the
+  right shape for it: deliberate, not one forgotten click away.
+
+- **No migration.** Cleaning already happened before storage on every
+  existing row, so nothing in the database means anything different than
+  it did yesterday.
+
+---
+
 ## 2026-08-13 — The per-input plot shows what it worked out
 
 - **k\* and saturation are now marked on the per-input plot.** The app was

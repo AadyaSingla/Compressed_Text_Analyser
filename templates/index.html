@@ -16,35 +16,25 @@
       </div>
     </div>
 
-    {% if prefill_text %}
-    <label>Cleaned text <span class="muted">({{ prefill_label }} — this is what Run BPE will analyse)</span></label>
-    <pre class="preview">{{ prefill_text[:2000] }}{% if prefill_text|length > 2000 %}…{% endif %}</pre>
-    <input type="hidden" name="cleaned_text" value="{{ prefill_text }}">
-    <input type="hidden" name="cleaned_label" value="{{ prefill_label }}">
-    <p class="muted">Choosing a file or sample above replaces this cleaned text.</p>
-    {% endif %}
-
     <div class="row">
       <div>
         <label>Category</label>
-        <label><input type="radio" name="category" value="english" required
-          {% if prefill_category == 'english' %}checked{% endif %}> English language</label>
-        <label><input type="radio" name="category" value="code" required
-          {% if prefill_category == 'code' %}checked{% endif %}> Source code</label>
+        <label><input type="radio" name="category" value="english" required> English language</label>
+        <label><input type="radio" name="category" value="code" required> Source code</label>
       </div>
     </div>
     <p class="muted">You choose the category — it's not detected automatically. It
-      decides which cleaning rules the Clean button applies (indentation is
+      decides which cleaning rules are applied before the run (indentation is
       preserved for code, collapsed for English prose).</p>
 
     <div class="row">
       <div>
         <label for="k_max">k — number of BPE merges</label>
-        <input type="number" id="k_max" name="k_max" value="{{ prefill_k_max or 200 }}" min="0" max="2000">
+        <input type="number" id="k_max" name="k_max" value="200" min="0" max="2000">
       </div>
       <div>
         <label for="k_step">Sweep step <span class="muted">(0 = single run at k)</span></label>
-        <input type="number" id="k_step" name="k_step" value="{{ prefill_k_step or 25 }}" min="0" max="2000">
+        <input type="number" id="k_step" name="k_step" value="25" min="0" max="2000">
       </div>
     </div>
     <p class="muted">With a step, the analyser runs k = 0, step, 2·step, … up to k, so the
@@ -53,14 +43,13 @@
       stored row — no duplicates.</p>
 
     <div class="row">
-      <button type="submit" formaction="{{ url_for('clean') }}">Clean</button>
       <button type="submit">Run BPE</button>
       <a class="button" href="{{ url_for('analysis') }}">Analysis</a>
       <a class="button" href="{{ url_for('figures') }}">Saved figures</a>
     </div>
-    <p class="muted"><strong>Clean</strong> applies the category's cleaning rules and
-      shows you the result — it doesn't run BPE. <strong>Run BPE</strong> analyses the
-      cleaned text if you've just cleaned, and the file or sample you picked otherwise.
+    <p class="muted"><strong>Run BPE</strong> applies the category's cleaning rules to
+      the file or sample you picked and analyses the result — every run is a run on
+      cleaned text, so there's nothing to clean by hand first.
       <strong>Analysis</strong> opens the cross-file page comparing every input so far,
       and <strong>Saved figures</strong> lists the PDFs saved from any graph.</p>
   </form>

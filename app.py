@@ -41,41 +41,28 @@ VALID_CATEGORIES = {"code", "english"}
 
 
 def _resolve_input():
-    """Get (label, text, category, cleaned) from the form.
+    """Get (label, text, category) from the form, as the user supplied it.
 
     Text comes from a bundled sample or an uploaded file — those are the
-    only two ways in. The third case isn't a user-typed input at all: it's
-    the cleaned text handed back by a previous Clean click, carried in a
-    hidden field so Run BPE can analyse it. Sample and upload win over it,
-    so choosing a new source after cleaning analyses the new source rather
-    than stale cleaned text.
+    only two ways in, and a sample wins if somehow both arrive. The text is
+    returned raw; `run()` cleans it, so this function stays a pure reading
+    of the form.
 
-    `cleaned` is derived from which source won, not from a form flag, so a
-    row can never be labelled cleaned when it isn't. Category is a separate
-    required field, never inferred, so the same text can deliberately be
-    run under either category.
+    Category is a separate required field, never inferred, so the same text
+    can deliberately be run under either category.
     """
     sample = request.form.get("sample", "")
     upload = request.files.get("file")
-    carried = request.form.get("cleaned_text", "")
     category = request.form.get("category", "")
 
     if sample in SAMPLES:
-        return sample, SAMPLES[sample].read_text(encoding="utf-8"), category, False
+        return sample, SAMPLES[sample].read_text(encoding="utf-8"), category
     if upload and upload.filename:
         text = upload.read().decode("utf-8", errors="replace")
         UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
         (UPLOAD_DIR / upload.filename).write_text(text, encoding="utf-8")
-        return upload.filename, text, category, False
-    if carried.strip():
-        # Round-tripping through a hidden field can turn newlines into CRLF
-        # on the way back. Both cleaning rules guarantee \n only, so undoing
-        # that is a no-op on untouched text and a repair otherwise — without
-        # it, the text analysed would differ from the text just displayed.
-        carried = carried.replace("\r\n", "\n").replace("\r", "\n")
-        label = request.form.get("cleaned_label", "") or carried[:30].replace("\n", " ")
-        return label, carried, category, True
-    return None, None, category, False
+        return upload.filename, text, category
+    return None, None, category
 
 
 def _parse_ks():
@@ -96,51 +83,17 @@ def _sample_names():
                                              int(name.rsplit("_", 1)[1].rstrip("k"))))
 
 
-def _render_index(**prefill):
+@app.route("/")
+def index():
     conn = db.connect()
     inputs = db.list_inputs(conn)
     conn.close()
-    return render_template("index.html", inputs=inputs, samples=_sample_names(),
-                           **prefill)
-
-
-@app.route("/")
-def index():
-    return _render_index()
-
-
-@app.route("/clean", methods=["POST"])
-def clean():
-    """Clean the selected file's text and hand it back for review, without
-    running BPE. A separate step from Run BPE — cleaning is something the
-    user opts into explicitly, not a flag bundled into the analysis run.
-    The result is shown read-only and carried in a hidden field, so the
-    next Run BPE click analyses exactly the text on screen."""
-    label, text, category, _ = _resolve_input()
-    if not text:
-        flash("Choose an input: upload a file or pick a sample.")
-        return redirect(url_for("index"))
-    if category not in VALID_CATEGORIES:
-        flash("Choose a category: source code or English language.")
-        return redirect(url_for("index"))
-    if len(text) > MAX_INPUT_CHARS:
-        flash(f"Input too large ({len(text)} chars, limit {MAX_INPUT_CHARS}).")
-        return redirect(url_for("index"))
-
-    cleaned_text = bpe.normalize(text, category)
-    flash("Text cleaned below — click Run BPE when you're ready.")
-    return _render_index(
-        prefill_text=cleaned_text,
-        prefill_label=label,
-        prefill_category=category,
-        prefill_k_max=request.form.get("k_max", "200"),
-        prefill_k_step=request.form.get("k_step", "25"),
-    )
+    return render_template("index.html", inputs=inputs, samples=_sample_names())
 
 
 @app.route("/run", methods=["POST"])
 def run():
-    label, text, category, cleaned = _resolve_input()
+    label, text, category = _resolve_input()
     if not text:
         flash("Choose an input: upload a file or pick a sample.")
         return redirect(url_for("index"))
@@ -157,13 +110,20 @@ def run():
         flash("k and step must be whole numbers.")
         return redirect(url_for("index"))
 
+    # Cleaning is part of running, not a step the user has to remember: the
+    # size limit above is checked against the text as supplied, then every
+    # run analyses the category's cleaned version of it. `cleaned` is
+    # therefore always true from this route — it stays a stored column
+    # because the API still lets a caller opt out (see api.py).
+    text = bpe.normalize(text, category)
+
     conn = db.connect()
     new_rows = 0
     for k in ks:
         if db.get_experiment(conn, text, k, category):
             continue
         stats = bpe.analyse(text, k)
-        _, created = db.save_experiment(conn, label, category, cleaned, text, stats)
+        _, created = db.save_experiment(conn, label, category, True, text, stats)
         new_rows += created
     summary = bpe.summarize(text, category, label)
     db.save_summary(conn, db.input_hash(text), summary)
