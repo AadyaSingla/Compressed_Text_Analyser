@@ -258,11 +258,13 @@ def _mark_summary_points(ax_utility, ax_vocabulary, summary, max_k):
         # utility curve here has the same shape (concave, flattening into
         # its right-hand end), so what clears the tail on one clears it on
         # all. Checked at this panel size against every stored input — at
-        # worst the label keeps ~26px from the nearest plotted point and
-        # stays inside the axes on all of them.
+        # worst the label keeps ~10px from the nearest plotted point and
+        # stays inside the axes on all of them. Don't shrink the drop much
+        # further: at -14 the gap is down to ~1.6px, which is the marker
+        # collision this offset exists to avoid.
         ax_utility.annotate(f"Saturation k = {saturation_k}",
                             (saturation_k, max_utility), textcoords="offset points",
-                            xytext=(12, -32), ha="right", va="top", fontsize=8,
+                            xytext=(12, -20), ha="right", va="top", fontsize=8,
                             color="black")
 
     if k_star <= max_k:
