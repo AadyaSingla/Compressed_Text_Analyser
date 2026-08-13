@@ -7,6 +7,51 @@ project evolves.)
 
 ---
 
+## 2026-08-13 — The per-input plot shows what it worked out
+
+- **k\* and saturation are now marked on the per-input plot.** The app was
+  computing the two most interesting points on the curve, storing them in
+  `file_summary`, and then drawing a figure that read none of them —
+  `_build_results_figure()` only ever saw the `experiments` rows. It now
+  looks the summary up as well and hands it to a new
+  `_mark_summary_points()`: a starred point at k\*, a square at saturation,
+  both labelled, and the chord from (0, 0) to (`saturation_k`,
+  `max_utility`) as a thin dashed grey line. The chord earns its place
+  because it is the definition — k\* is the point furthest above it — so
+  drawing it turns the marker from an assertion into something the reader
+  can check by eye. The vocabulary panel gets a light dotted vertical line
+  at k\*, unlabelled, so the vocabulary cost there can be read off without
+  repeating the label that already sits on the utility panel.
+
+- **The saturation marker and chord are conditional, and that is the whole
+  subtlety.** They are drawn only when `saturation_k` is at most the largest
+  k among the stored rows. Most files were swept to k = 300 but saturate
+  somewhere past 1,000: marking a point out there stretches the x-axis by a
+  factor of five and squashes the actual measured curve into the left edge,
+  which loses more than the marker gains. Out of range, k\* is marked alone
+  and the axes stay exactly where the data put them. (k\* itself is always
+  marked; on a couple of files swept to 300 it sits a few merges past the
+  end, which nudges the axis slightly and is worth knowing.)
+
+- **`db.get_summary(conn, ihash, category)`** is new — the single-row
+  counterpart to `get_all_summaries()`. Keyed on the pair the table is
+  unique on, since a hash can have a summary under each category and the
+  figure marks each in that category's own colour. A category with no
+  summary row draws its curve unmarked rather than raising, so an input
+  analysed before summaries existed still plots.
+
+- **No schema change, no new dependencies**, and both the PNG route and the
+  Save PDF route go through the same builder, so the saved vector PDF
+  carries the markers too.
+
+- **Merges is back as a table column.** The naming pass below dropped it as
+  repetition, which was wrong: unlike category and size, `merges_applied`
+  varies down the rows, and it is the only way to tell a flat tail that
+  means "more merges bought nothing" from one that means "no further merges
+  happened at all." It sits directly after k, requested next to actual.
+
+---
+
 ## 2026-08-11 — One name per metric
 
 - **Every quantity now has exactly one name, used the same in the code, the

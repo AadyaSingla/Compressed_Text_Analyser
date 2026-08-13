@@ -214,19 +214,65 @@ def _safe_stem(label):
     return cleaned or "figure"
 
 
+def _mark_summary_points(ax_utility, ax_vocabulary, summary, max_k, color):
+    """Put one category's stored k* and saturation point onto the per-file
+    figure, in that category's own colour.
+
+    k* is defined as the point sitting furthest above the straight chord
+    from (0, 0) to (saturation_k, max_utility), so the chord is drawn with
+    it — without the chord the marker is a dot on a curve with nothing to
+    say why that k and not its neighbour.
+
+    The saturation marker and the chord are drawn only when saturation_k
+    falls inside the swept range. Most files are swept to a few hundred
+    merges but only saturate past a thousand, and a marker out there
+    stretches the x-axis until the curve itself is squashed into the left
+    edge — so out of range, k* is marked alone and the axes are left as the
+    data set them.
+    """
+    k_star, utility_at_k_star = summary["k_star"], summary["utility_at_k_star"]
+    saturation_k, max_utility = summary["saturation_k"], summary["max_utility"]
+
+    if saturation_k <= max_k:
+        ax_utility.plot([0, saturation_k], [0, max_utility], linestyle="--",
+                        linewidth=0.8, color="grey", zorder=1)
+        ax_utility.plot([saturation_k], [max_utility], marker="s", markersize=6,
+                        color=color, zorder=4)
+        # Labelled below-left: saturation is the top-right end of the curve,
+        # so a label above it lands outside the axes and gets clipped.
+        ax_utility.annotate(f"Saturation k = {saturation_k}",
+                            (saturation_k, max_utility), textcoords="offset points",
+                            xytext=(-8, -12), ha="right", va="top", fontsize=8,
+                            color=color)
+
+    ax_utility.plot([k_star], [utility_at_k_star], marker="*", markersize=14,
+                    color=color, zorder=5)
+    ax_utility.annotate(f"k* = {k_star}", (k_star, utility_at_k_star),
+                        textcoords="offset points", xytext=(6, -12),
+                        fontsize=8, color=color)
+
+    # The vocabulary panel gets the line but no label: it shares its x-axis
+    # meaning with the utility panel, where k* is already named.
+    ax_vocabulary.axvline(k_star, linestyle=":", linewidth=1, color=color,
+                          alpha=0.5, zorder=0)
+
+
 def _build_results_figure(ihash):
     """Utility, and vocabulary vs distinct tokens, against k. One line per category
     if a hash has rows from more than one (still possible — category,
     unlike cleaned, stays part of an experiment's identity)."""
     conn = db.connect()
     rows = db.rows_for_input(conn, ihash)
+    by_category = defaultdict(list)
+    for r in rows:
+        by_category[r["category"]].append(r)
+    # Looked up per category, since file_summary is unique on
+    # (input_hash, category) and a hash can have a row under each.
+    summaries = {c: db.get_summary(conn, ihash, c) for c in by_category}
     conn.close()
     if not rows:
         abort(404)
 
-    by_category = defaultdict(list)
-    for r in rows:
-        by_category[r["category"]].append(r)
     colors = {"code": "#4058B0", "english": "#B05840"}
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
@@ -238,6 +284,10 @@ def _build_results_figure(ihash):
                  label=f"{category} — vocabulary", color=color)
         ax2.plot(ks, [r["distinct_tokens"] for r in crows], marker="o", linestyle="--",
                  label=f"{category} — distinct tokens", color=color)
+        # An input analysed before its summary was stored simply gets its
+        # curve without markers, rather than failing to plot at all.
+        if summaries[category]:
+            _mark_summary_points(ax1, ax2, summaries[category], max(ks), color)
 
     ax1.set_xlabel("k")
     ax1.set_ylabel("Utility")

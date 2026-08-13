@@ -225,6 +225,14 @@ method (Satopaa et al., 2011, *Finding a "Kneedle" in a Haystack*):
 A single-point curve, or one that compresses nothing at all, has no
 meaningful bend, so both return k = 0.
 
+**Seeing it.** The per-input plot draws this: k\* and saturation are marked
+and labelled on the utility panel, with the chord between (0, 0) and
+(`saturation_k`, `max_utility`) as a thin dashed grey line, so the distance
+being maximised is visible rather than asserted. The saturation end is
+often far outside the swept range, and in that case the marker and the
+chord are left off — see `_mark_summary_points()` in the
+[file-by-file reference](#file-by-file-reference).
+
 **Why the chord and not curvature.** The utility curve is a discrete
 sequence of integers, so numerical second derivatives on it are noisy and
 would need smoothing parameters chosen by hand. The chord distance is one
@@ -536,6 +544,13 @@ zero setup.
   always safe here because the summary is derived data — a cache of what
   the current text implies, never something the user typed.
 
+- **`get_summary(conn, ihash, category)`** — the single summary row for one
+  input, or `None` if it has experiments but was never summarized. Keyed by
+  the (hash, category) pair the table is unique on, not by hash alone: one
+  text analysed as both code and english has a row under each, and the
+  per-input figure marks them separately. Used by `_build_results_figure()`
+  to draw k\* and saturation onto the per-file plot.
+
 - **`get_all_summaries(conn)`** — every summary row, `ORDER BY category,
   size_chars`, which is the order the `/analysis` table and both scatter
   plots read most naturally: categories grouped, and within each, small
@@ -645,6 +660,26 @@ these caps.
   necessarily the same underlying text). Each figure is `plt.close()`d
   after saving to avoid leaking memory across requests.
 
+- **`_mark_summary_points(ax_utility, ax_vocabulary, summary, max_k, color)`**
+  — puts one category's stored `k_star` and `saturation_k` onto that
+  figure, in the category's own colour, from its `get_summary()` row: a
+  starred, labelled point at k\*, a square labelled point at saturation,
+  the thin dashed grey chord from (0, 0) to (`saturation_k`,
+  `max_utility`), and a light dotted vertical line at k\* on the vocabulary
+  panel so the vocabulary cost there can be read off. The chord is drawn
+  because it *is* the definition — k\* is the point sitting furthest above
+  it (see [k\*: where merges stop paying
+  off](#k-where-merges-stop-paying-off)) — so without it the marker is a
+  dot with nothing to say why that k and not its neighbour.
+
+  **The saturation marker and the chord appear only when `saturation_k <=`
+  the largest k among the stored rows.** Most files are swept to a few
+  hundred merges but saturate past a thousand, and a marker out there
+  stretches the x-axis until the curve is squashed into the left edge —
+  so out of range, k\* is marked alone and the axes stay as the data set
+  them. A category with no summary row yet draws its curve unmarked rather
+  than raising.
+
 - **`analysis()`** — `GET /analysis`, the cross-file page: one
   `get_all_summaries()` query, straight into the template. Unlike
   `results()` it isn't scoped to a hash — it's the only page in the app
@@ -750,9 +785,11 @@ nothing.
   (rather than tabs) is what makes the fixed priority order in
   `_resolve_input()` the only conflict-resolution logic needed.
 - **`results.html`** — the plot (`<img src="{{ url_for('plot', ihash=ihash) }}">`),
-  the stats table (one row per k: Tokens, Utility, Vocabulary, Distinct
-  tokens — the category, merges-applied and size columns are left out
-  because they're identical on every row of one input), and the input
+  the stats table (one row per k: Merges, Tokens, Utility, Vocabulary,
+  Distinct tokens — the category and size columns are left out because
+  they're identical on every row of one input, while Merges is not: it is
+  the merges BPE actually performed, which falls short of the requested k
+  once the text runs out of repeated pairs), and the input
   preview. The preview's truncation indicator is computed in `app.py`'s
   `results()` route from the raw stored text's length
   (`len(input_string) > 400`) rather than from any one row's

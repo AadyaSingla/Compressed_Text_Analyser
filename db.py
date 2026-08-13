@@ -159,6 +159,17 @@ def save_summary(conn, ihash, summary):
     conn.commit()
 
 
+def get_summary(conn, ihash, category):
+    """The one file_summary row for (ihash, category), or None if the input
+    has experiment rows but was never summarized. Per category rather than
+    per hash because the table is unique on the pair, and one text analysed
+    as both code and english has a row under each."""
+    return conn.execute(
+        "SELECT * FROM file_summary WHERE input_hash = ? AND category = ?",
+        (ihash, category),
+    ).fetchone()
+
+
 def get_all_summaries(conn):
     """All file_summary rows, ordered by category then size_chars, for the
     cross-file analysis page."""
