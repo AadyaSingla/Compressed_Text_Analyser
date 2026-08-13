@@ -13,12 +13,14 @@
 
   <table>
     <tr>
-      <th class="num">k</th><th class="num">Tokens</th><th class="num">Utility</th>
+      <th class="num">k</th><th class="num">Merges</th>
+      <th class="num">Tokens</th><th class="num">Utility</th>
       <th class="num">Vocabulary</th><th class="num">Distinct tokens</th>
     </tr>
     {% for r in rows %}
     <tr>
       <td class="num">{{ r['k'] }}</td>
+      <td class="num">{{ r['merges_applied'] }}</td>
       <td class="num">{{ r['tokens'] }}</td>
       <td class="num">{{ r['utility'] }}</td>
       <td class="num">{{ r['vocabulary'] }}</td>
