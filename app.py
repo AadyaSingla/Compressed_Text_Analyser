@@ -4,6 +4,7 @@ import io
 import re
 from collections import defaultdict
 from datetime import datetime
+from functools import lru_cache
 
 import matplotlib
 
@@ -153,6 +154,30 @@ def run():
     return redirect(url_for("results", ihash=db.input_hash(text)))
 
 
+# Markers for the two whitespace characters that show up inside merged
+# tokens. Without them the code files' most telling merges — the ones that
+# learn indentation and line breaks — render as blank cells. Display only:
+# nothing here touches the text BPE ran on.
+SPACE_MARKER = "·"
+NEWLINE_MARKER = "\\n"
+
+
+def _visible(token):
+    """A merge token as it should read on the page, with whitespace marked."""
+    return token.replace(" ", SPACE_MARKER).replace("\n", NEWLINE_MARKER)
+
+
+# The merge sequence isn't stored — experiments keep only the counts — so it
+# is recomputed from the input text, which takes a couple of seconds on the
+# larger files. Cached because a results page is reloaded often (every Save
+# PDF posts back to it) and the answer never changes: same text and same k
+# always give the same merges.
+@lru_cache(maxsize=8)
+def _merges_for(text, k):
+    """The ordered pairs BPE merged in a k-merge run over `text`."""
+    return bpe.train_bpe(text, k)[1]
+
+
 @app.route("/results/<ihash>")
 def results(ihash):
     conn = db.connect()
@@ -162,9 +187,17 @@ def results(ihash):
         abort(404)
     full_text = rows[0]["input_string"]
     preview = full_text[:400]
+    # From the longest run stored for this input: BPE is deterministic and
+    # always starts from characters, so a shorter run's merges are a prefix
+    # of a longer one's — the longest run is the complete list.
+    merges = [
+        {"n": i, "first": _visible(a), "second": _visible(b), "result": _visible(a + b)}
+        for i, (a, b) in enumerate(_merges_for(full_text, max(r["k"] for r in rows)), 1)
+    ]
     return render_template("results.html", rows=rows, ihash=ihash,
                            label=rows[0]["label"], preview=preview,
-                           truncated=len(full_text) > 400)
+                           truncated=len(full_text) > 400, merges=merges,
+                           space_marker=SPACE_MARKER, newline_marker=NEWLINE_MARKER)
 
 
 def _serve_png(fig):

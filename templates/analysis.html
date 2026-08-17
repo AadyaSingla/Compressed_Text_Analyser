@@ -1,47 +1,57 @@
 {% extends "base.html" %}
 {% block title %}Cross-file analysis · Compressed Text Analyser{% endblock %}
 {% block content %}
-  <h2>Cross-file analysis</h2>
-  <p class="muted">One row per analysed input, summarizing where its BPE utility
-    curve bends — k*, the point of diminishing returns for adding more merges.</p>
+  <div class="card">
+    <h2>Cross-file analysis</h2>
+    <p class="muted">One row per analysed input, summarizing where its BPE utility
+      curve bends — k*, the point of diminishing returns for adding more merges.</p>
+
+    {% if summaries %}
+    <table>
+      <tr>
+        <th>Input</th><th>Type</th><th class="num">Size (characters)</th>
+        <th class="num">k*</th><th class="num">Utility ratio</th>
+        <th class="num">Saturation k</th>
+      </tr>
+      {% for s in summaries %}
+      <tr>
+        <td>{{ s['label'] }}</td>
+        <td>{{ s['category'] }}</td>
+        <td class="num">{{ s['size_chars'] }}</td>
+        <td class="num">{{ s['k_star'] }}</td>
+        <td class="num">{{ "%.2f"|format(s['utility_ratio']) }}</td>
+        <td class="num">{{ s['saturation_k'] }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% else %}
+      <p class="empty">No summaries yet — run an analysis from the home page first.</p>
+    {% endif %}
+  </div>
 
   {% if summaries %}
-  <table>
-    <tr>
-      <th>Input</th><th>Type</th><th class="num">Size (characters)</th>
-      <th class="num">k*</th><th class="num">Utility ratio</th>
-      <th class="num">Saturation k</th>
-    </tr>
-    {% for s in summaries %}
-    <tr>
-      <td>{{ s['label'] }}</td>
-      <td>{{ s['category'] }}</td>
-      <td class="num">{{ s['size_chars'] }}</td>
-      <td class="num">{{ s['k_star'] }}</td>
-      <td class="num">{{ "%.2f"|format(s['utility_ratio']) }}</td>
-      <td class="num">{{ s['saturation_k'] }}</td>
-    </tr>
-    {% endfor %}
-  </table>
-
-  <div class="plot-head">
-    <h2>k* vs Size (characters)</h2>
-    <form method="post" action="{{ url_for('save_analysis_plot', name='k_star') }}">
-      <button class="small" type="submit">Save PDF</button>
-    </form>
+  <div class="card">
+    <div class="plot-head">
+      <h2>k* vs Size (characters)</h2>
+      <form method="post" action="{{ url_for('save_analysis_plot', name='k_star') }}">
+        <button class="small" type="submit" title="Write this graph to the figures/ folder as a vector PDF">Save PDF</button>
+      </form>
+    </div>
+    <p class="muted">Where each input's utility curve bends, plotted against how much text it holds.</p>
+    <img class="plot" src="{{ url_for('analysis_k_star_plot') }}"
+         alt="k* vs size in characters, by category">
   </div>
-  <img class="plot" src="{{ url_for('analysis_k_star_plot') }}"
-       alt="k* vs size in characters, by category">
 
-  <div class="plot-head">
-    <h2>Utility ratio vs Size (characters)</h2>
-    <form method="post" action="{{ url_for('save_analysis_plot', name='utility_ratio') }}">
-      <button class="small" type="submit">Save PDF</button>
-    </form>
+  <div class="card">
+    <div class="plot-head">
+      <h2>Utility ratio vs Size (characters)</h2>
+      <form method="post" action="{{ url_for('save_analysis_plot', name='utility_ratio') }}">
+        <button class="small" type="submit" title="Write this graph to the figures/ folder as a vector PDF">Save PDF</button>
+      </form>
+    </div>
+    <p class="muted">How much compression each input gained, plotted against how much text it holds.</p>
+    <img class="plot" src="{{ url_for('analysis_utility_ratio_plot') }}"
+         alt="Utility ratio vs size in characters, by category">
   </div>
-  <img class="plot" src="{{ url_for('analysis_utility_ratio_plot') }}"
-       alt="Utility ratio vs size in characters, by category">
-  {% else %}
-    <p class="muted">No summaries yet — run an analysis from the home page first.</p>
   {% endif %}
 {% endblock %}

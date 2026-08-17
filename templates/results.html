@@ -1,34 +1,68 @@
 {% extends "base.html" %}
 {% block title %}{{ label }} · Compressed Text Analyser{% endblock %}
 {% block content %}
-  <div class="plot-head">
-    <h2>Results — {{ label }}</h2>
-    <form method="post" action="{{ url_for('save_results_plot', ihash=ihash) }}">
-      <button class="small" type="submit">Save PDF</button>
-    </form>
+  <div class="card">
+    <div class="plot-head">
+      <h2>Results — {{ label }}</h2>
+      <form method="post" action="{{ url_for('save_results_plot', ihash=ihash) }}">
+        <button class="small" type="submit" title="Write this graph to the figures/ folder as a vector PDF">Save PDF</button>
+      </form>
+    </div>
+    <p class="muted">Utility, vocabulary and distinct tokens across the sweep, with k* marked.</p>
+
+    <img class="plot" src="{{ url_for('plot', ihash=ihash) }}"
+         alt="Utility, and vocabulary vs distinct tokens, against k, with k* marked">
+
+    <table>
+      <tr>
+        <th class="num">k</th><th class="num">Merges</th>
+        <th class="num">Tokens</th><th class="num">Utility</th>
+        <th class="num">Vocabulary</th><th class="num">Distinct tokens</th>
+      </tr>
+      {% for r in rows %}
+      <tr>
+        <td class="num">{{ r['k'] }}</td>
+        <td class="num">{{ r['merges_applied'] }}</td>
+        <td class="num">{{ r['tokens'] }}</td>
+        <td class="num">{{ r['utility'] }}</td>
+        <td class="num">{{ r['vocabulary'] }}</td>
+        <td class="num">{{ r['distinct_tokens'] }}</td>
+      </tr>
+      {% endfor %}
+    </table>
   </div>
 
-  <img class="plot" src="{{ url_for('plot', ihash=ihash) }}"
-       alt="Utility, and vocabulary vs distinct tokens, against k, with k* marked">
+  <div class="card">
+    <h2>Merges learned</h2>
+    <p class="muted">In the order BPE applied them, from the longest run stored for
+      this input. A space is shown as <code>{{ space_marker }}</code> and a newline
+      as <code>{{ newline_marker }}</code>.</p>
+    {% if merges %}
+    <div class="scroll-table">
+      <table>
+        <tr>
+          <th class="num">#</th>
+          <th>First</th><th>Second</th><th>Result</th>
+        </tr>
+        {% for m in merges %}
+        <tr>
+          <td class="num">{{ m.n }}</td>
+          <td class="token">{{ m.first }}</td>
+          <td class="token">{{ m.second }}</td>
+          <td class="token">{{ m.result }}</td>
+        </tr>
+        {% endfor %}
+      </table>
+    </div>
+    <p class="hint">{{ merges | length }} merge(s) in total.</p>
+    {% else %}
+    <p class="empty">No merges — no pair of tokens occurred twice.</p>
+    {% endif %}
+  </div>
 
-  <table>
-    <tr>
-      <th class="num">k</th><th class="num">Merges</th>
-      <th class="num">Tokens</th><th class="num">Utility</th>
-      <th class="num">Vocabulary</th><th class="num">Distinct tokens</th>
-    </tr>
-    {% for r in rows %}
-    <tr>
-      <td class="num">{{ r['k'] }}</td>
-      <td class="num">{{ r['merges_applied'] }}</td>
-      <td class="num">{{ r['tokens'] }}</td>
-      <td class="num">{{ r['utility'] }}</td>
-      <td class="num">{{ r['vocabulary'] }}</td>
-      <td class="num">{{ r['distinct_tokens'] }}</td>
-    </tr>
-    {% endfor %}
-  </table>
-
-  <h2>Input preview</h2>
-  <pre class="preview">{{ preview }}{% if truncated %}…{% endif %}</pre>
+  <div class="card">
+    <h2>Input preview</h2>
+    <p class="muted">The start of the cleaned text the run was performed on.</p>
+    <pre class="preview">{{ preview }}{% if truncated %}…{% endif %}</pre>
+  </div>
 {% endblock %}

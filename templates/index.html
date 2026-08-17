@@ -1,82 +1,90 @@
 {% extends "base.html" %}
 {% block content %}
-  <h2>Run a BPE experiment</h2>
-  <form action="{{ url_for('run') }}" method="post" enctype="multipart/form-data">
-    <div class="row">
-      <div>
-        <label for="file">Upload a file</label>
-        <input type="file" id="file" name="file">
-      </div>
-      <div>
-        <label for="sample">…or pick a sample</label>
-        <select id="sample" name="sample">
-          <option value="">(none)</option>
-          {% for s in samples %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
-        </select>
-      </div>
-    </div>
+  <div class="card">
+    <h2>Run a BPE experiment</h2>
+    <p class="muted">Pick an input, tell the analyser what kind of text it is, and choose
+      how many merges to learn.</p>
 
-    <div class="row">
-      <div>
-        <label>Category</label>
-        <label><input type="radio" name="category" value="english" required> English language</label>
-        <label><input type="radio" name="category" value="code" required> Source code</label>
+    <form action="{{ url_for('run') }}" method="post" enctype="multipart/form-data">
+      <div class="row" style="margin-top: 1.25rem;">
+        <div>
+          <label for="file">Upload a file</label>
+          <input type="file" id="file" name="file">
+        </div>
+        <div>
+          <label for="sample">…or pick a sample</label>
+          <select id="sample" name="sample">
+            <option value="">(none)</option>
+            {% for s in samples %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
+          </select>
+        </div>
       </div>
-    </div>
-    <p class="muted">You choose the category — it's not detected automatically. It
-      decides which cleaning rules are applied before the run (indentation is
-      preserved for code, collapsed for English prose).</p>
 
-    <div class="row">
-      <div>
-        <label for="k_max">k — number of BPE merges</label>
-        <input type="number" id="k_max" name="k_max" value="200" min="0" max="2000">
+      <div class="row" style="margin-bottom: .5rem;">
+        <div>
+          <label>Category</label>
+          <label class="choice"><input type="radio" name="category" value="english" required> English language</label>
+          <label class="choice"><input type="radio" name="category" value="code" required> Source code</label>
+        </div>
       </div>
-      <div>
-        <label for="k_step">Sweep step <span class="muted">(0 = single run at k)</span></label>
-        <input type="number" id="k_step" name="k_step" value="25" min="0" max="2000">
+      <p class="note">You choose the category — it's not detected automatically. It
+        decides which cleaning rules are applied before the run (indentation is
+        preserved for code, collapsed for English prose).</p>
+
+      <div class="row" style="margin-bottom: .5rem;">
+        <div>
+          <label for="k_max">k — number of BPE merges</label>
+          <input type="number" id="k_max" name="k_max" value="200" min="0" max="2000">
+        </div>
+        <div>
+          <label for="k_step">Sweep step <span class="muted">(0 = single run at k)</span></label>
+          <input type="number" id="k_step" name="k_step" value="25" min="0" max="2000">
+        </div>
       </div>
-    </div>
-    <p class="muted">With a step, the analyser runs k = 0, step, 2·step, … up to k, so the
-      results page can show utility, vocabulary and distinct tokens across
-      the whole sweep. Repeated (input, k, category) combinations reuse the
-      stored row — no duplicates.</p>
+      <p class="note">With a step, the analyser runs k = 0, step, 2·step, … up to k, so the
+        results page can show utility, vocabulary and distinct tokens across
+        the whole sweep. Repeated (input, k, category) combinations reuse the
+        stored row — no duplicates.</p>
 
-    <div class="row">
-      <button type="submit">Run BPE</button>
-      <a class="button" href="{{ url_for('analysis') }}">Analysis</a>
-      <a class="button" href="{{ url_for('figures') }}">Saved figures</a>
-    </div>
-    <p class="muted"><strong>Run BPE</strong> applies the category's cleaning rules to
-      the file or sample you picked and analyses the result — every run is a run on
-      cleaned text, so there's nothing to clean by hand first.
-      <strong>Analysis</strong> opens the cross-file page comparing every input so far,
-      and <strong>Saved figures</strong> lists the PDFs saved from any graph.</p>
-  </form>
+      <div class="row actions">
+        <button type="submit">Run BPE</button>
+        <a class="button secondary" href="{{ url_for('analysis') }}">Analysis</a>
+        <a class="button secondary" href="{{ url_for('figures') }}">Saved figures</a>
+      </div>
+      <p class="note" style="margin-top: .9rem;"><strong>Run BPE</strong> applies the category's
+        cleaning rules to the file or sample you picked and analyses the result — every run is
+        a run on cleaned text, so there's nothing to clean by hand first.
+        <strong>Analysis</strong> opens the cross-file page comparing every input so far,
+        and <strong>Saved figures</strong> lists the PDFs saved from any graph.</p>
+    </form>
+  </div>
 
-  <h2>Stored inputs</h2>
-  {% if inputs %}
-  <table>
-    <tr><th>Input</th><th>Type</th><th class="num">Size (characters)</th><th class="num">Runs</th>
-        <th class="num">Max k</th><th>Last run (UTC)</th><th></th></tr>
-    {% for i in inputs %}
-    <tr>
-      <td><a href="{{ url_for('results', ihash=i['input_hash']) }}">{{ i['label'] }}</a></td>
-      <td>{{ i['category'] }}</td>
-      <td class="num">{{ i['size_chars'] }}</td>
-      <td class="num">{{ i['runs'] }}</td>
-      <td class="num">{{ i['max_k'] }}</td>
-      <td>{{ i['last_run'] }}</td>
-      <td>
-        <form action="{{ url_for('delete', ihash=i['input_hash']) }}" method="post"
-              onsubmit="return confirm('Delete all runs for this input?');">
-          <button class="danger" type="submit">Delete</button>
-        </form>
-      </td>
-    </tr>
-    {% endfor %}
-  </table>
-  {% else %}
-    <p class="muted">No experiments yet — run one above.</p>
-  {% endif %}
+  <div class="card">
+    <h2>Stored inputs</h2>
+    <p class="muted">Every input analysed so far. Open one to see its curves, table and merges.</p>
+    {% if inputs %}
+    <table>
+      <tr><th>Input</th><th>Type</th><th class="num">Size (characters)</th><th class="num">Runs</th>
+          <th class="num">Max k</th><th>Last run (UTC)</th><th></th></tr>
+      {% for i in inputs %}
+      <tr>
+        <td><a href="{{ url_for('results', ihash=i['input_hash']) }}">{{ i['label'] }}</a></td>
+        <td>{{ i['category'] }}</td>
+        <td class="num">{{ i['size_chars'] }}</td>
+        <td class="num">{{ i['runs'] }}</td>
+        <td class="num">{{ i['max_k'] }}</td>
+        <td class="muted">{{ i['last_run'] }}</td>
+        <td>
+          <form action="{{ url_for('delete', ihash=i['input_hash']) }}" method="post"
+                onsubmit="return confirm('Delete all runs for this input?');">
+            <button class="danger" type="submit" title="Remove this input and all of its stored runs">Delete</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% else %}
+      <p class="empty">No experiments yet — run one above.</p>
+    {% endif %}
+  </div>
 {% endblock %}
