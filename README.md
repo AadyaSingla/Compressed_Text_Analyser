@@ -1,5 +1,8 @@
 # Compressed Text Analyser
 
+This repository contains the source code for the Bachelor thesis *An Analysis of Byte-Pair Encoding*.
+The thesis was submitted at the Institute of Theoretical Computer Science, Technische Universität Dresden.
+
 A small Flask web app for running **Byte Pair Encoding (BPE)** experiments on
 text. You give it a file and a number **k** (how many merges to perform), and
 it reports how far the text compressed: how many tokens are left, how many are
