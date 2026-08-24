@@ -4,9 +4,6 @@ from pathlib import Path
 
 DATA_DIR = Path(__file__).parent / "data"
 UPLOAD_DIR = DATA_DIR / "uploads"
-
-# Where Save PDF writes its figures. Tracked in git, unlike data/uploads —
-# these are thesis output, not scratch input.
 FIGURE_DIR = Path(__file__).parent / "figures"
 
 # Size-graded samples: consecutive, non-overlapping slices cut from one
