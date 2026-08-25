@@ -100,8 +100,9 @@ a clean 4.
    never used in two merges at once.
 7. **Stop after k merges.** k is an upper bound, capped at 2000 in the app.
 8. **Stop early if the best pair occurs fewer than 2 times.** Merging a
-   once-only pair grows the vocabulary without compressing anything. This is
-   why *merges applied* can be lower than k.
+   once-only pair saves exactly one symbol while costing a whole new
+   vocabulary entry — a trade not worth making. This is why *merges applied*
+   can be lower than k.
 9. **Stop if fewer than 2 tokens remain.**
 10. **Merges are never undone.** Later merges only combine existing tokens
     into bigger ones.
@@ -153,7 +154,9 @@ applies the distance-to-chord method (Satopaa et al., 2011, *Finding a
 A single-point curve, or one that compresses nothing, returns k = 0.
 
 **Saturation, k_sat**, is the smallest k at which no pair of adjacent tokens
-occurs more than once. Past it, no merge is possible and utility cannot rise.
+occurs more than once. Merges are still possible past it — every remaining
+pair occurs once, and merging one still saves a symbol — but each buys that
+single symbol with a full vocabulary entry, so this is where the run stops.
 
 The per-input plot marks and labels k\* and k_sat on the utility panel, with
 the chord drawn as a thin dashed grey line. Marks outside the swept range are
@@ -167,8 +170,8 @@ on `/analysis`:
 | `size_chars` | Input size in characters. The x-axis of both cross-file plots. |
 | `k_star` (**k\***) | The knee: how many merges before returns visibly diminish. |
 | `utility_at_k_star` / `tokens_at_k_star` | Symbols saved and tokens left at k\*. The vocabulary there is not stored — it is the base alphabet plus `k_star`. |
-| `max_utility` | Utility at saturation: the most this text can be compressed by BPE. |
-| `utility_ratio` | `utility_at_k_star ÷ max_utility` — the share of available compression you get at k\* instead of k_sat. Shown as a decimal to two places (`0.74`), never a percentage. |
+| `max_utility` | Utility at saturation, which is where the run stops — not the largest utility reachable in principle. For english_20k it is 13,222 symbols saved; merging on past saturation, one once-only pair at a time, would eventually reach 17,295. |
+| `utility_ratio` | `utility_at_k_star ÷ max_utility` — the share of the run's own compression you get at k\* instead of k_sat. The denominator is utility at saturation, not the theoretical maximum, so this is a fraction of what the run actually reaches. Shown as a decimal to two places (`0.74`), never a percentage. |
 | `saturation_k` | k_sat, as defined above. |
 
 **The two cross-file plots** both put **Size (characters)** on the x-axis, with
